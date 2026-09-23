@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="app">
+    <header class="top">
+      <div>
+        <div class="eyebrow">KR ETF Lab · Agent build</div>
+        <h1>한국에서 사는 ETF로 포트 짜고 과거 수익률 보기</h1>
+        <p class="sub">KRX 상장 ETF만 넣었습니다. 비중을 정하면 공통 상장 기간의 가격 수익률, 낙폭, 벤치마크 대비를 계산합니다.</p>
+      </div>
+      <div class="stamp" id="stamp"></div>
+    </header>
+    <div class="layout">
+      <aside class="card pad">
+        <div class="section-title">프리셋</div>
+        <div class="presets" id="presets"></div>
+        <div class="row">
+          <select id="period">
+            <option value="1y">1년</option>
+            <option value="3y">3년</option>
+            <option value="5y" selected>5년</option>
+            <option value="max">가능한 최장</option>
+            <option value="custom">직접 지정</option>
+          </select>
+          <select id="rebalance">
+            <option value="Q" selected>분기 리밸런싱</option>
+            <option value="Y">연 1회</option>
+            <option value="N">리밸런싱 없음</option>
+          </select>
+        </div>
+        <div class="row" id="customDates" style="display:none">
+          <input type="date" id="startDate" value="2021-01-01" />
+          <input type="date" id="endDate" value="2026-09-23" />
+        </div>
+        <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
+        <div class="etf-list" id="etfList"></div>
+        <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화</span></div>
+        <button class="primary" id="run">백테스트 실행</button>
+      </aside>
+      <main id="result"><div class="card pad empty">계산 중…</div></main>
+    </div>
+    <p class="foot">
+      투자 자문이 아닙니다. 과거 수익률은 미래 수익을 보장하지 않습니다.
+      시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
+    </p>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
