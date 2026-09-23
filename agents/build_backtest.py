@@ -217,6 +217,186 @@ def backtest(
     )
 
 
+
+def _curve_pairs(curve):
+    """Normalize curve to list of (date, value) tuples."""
+    out = []
+    for point in curve:
+        if isinstance(point, dict):
+            out.append((point["d"], float(point["v"])))
+        else:
+            out.append((point[0], float(point[1])))
+    return out
+
+
+def compute_drawdown(curve, episode_threshold: float = -0.05):
+    """Underwater drawdown series and episode stats from a wealth curve.
+
+    dd[t] = (v - peak) / peak <= 0. maxDD matches engine mdd for the same path.
+    recoveryDate is the first date after trough where value recovers to the
+    peak that produced maxDD; None if never recovered.
+    Episodes: contiguous underwater stretches with depth <= episode_threshold.
+    """
+    pairs = _curve_pairs(curve)
+    if not pairs:
+        return {
+            "series": [],
+            "maxDD": 0.0,
+            "peakDate": None,
+            "troughDate": None,
+            "recoveryDate": None,
+            "underwaterDays": 0,
+            "episodes": [],
+        }
+
+    series = []
+    peak = pairs[0][1]
+    peak_date = pairs[0][0]
+    max_dd = 0.0
+    max_peak_date = peak_date
+    max_trough_date = peak_date
+    max_peak_value = peak
+
+    # Episode tracking
+    episodes = []
+    ep_active = False
+    ep_peak_date = None
+    ep_trough_date = None
+    ep_trough_dd = 0.0
+
+    for d, v in pairs:
+        if v > peak:
+            # New high: close any open episode that recovered (already recovered when dd hits 0)
+            peak = v
+            peak_date = d
+        dd = v / peak - 1.0 if peak > 0 else 0.0
+        if dd > 0:
+            dd = 0.0
+        series.append({"d": d, "dd": dd})
+
+        if dd < max_dd:
+            max_dd = dd
+            max_peak_date = peak_date
+            max_trough_date = d
+            max_peak_value = peak
+
+        # Episodes: start when leaving peak (dd < 0)
+        if not ep_active:
+            if dd < 0:
+                ep_active = True
+                ep_peak_date = peak_date
+                ep_trough_date = d
+                ep_trough_dd = dd
+        else:
+            if dd < ep_trough_dd:
+                ep_trough_dd = dd
+                ep_trough_date = d
+            # Recovered to peak
+            if dd >= 0 or abs(dd) < 1e-15:
+                if ep_trough_dd <= episode_threshold:
+                    episodes.append({
+                        "peakDate": ep_peak_date,
+                        "troughDate": ep_trough_date,
+                        "recoveryDate": d,
+                        "depth": ep_trough_dd,
+                    })
+                ep_active = False
+                ep_peak_date = None
+                ep_trough_date = None
+                ep_trough_dd = 0.0
+
+    # Open episode at end of series
+    if ep_active and ep_trough_dd <= episode_threshold:
+        episodes.append({
+            "peakDate": ep_peak_date,
+            "troughDate": ep_trough_date,
+            "recoveryDate": None,
+            "depth": ep_trough_dd,
+        })
+
+    # Recovery for maxDD episode
+    recovery_date = None
+    if max_dd < 0 and max_peak_value > 0:
+        past_trough = False
+        for d, v in pairs:
+            if d == max_trough_date:
+                past_trough = True
+                continue
+            if past_trough and v >= max_peak_value:
+                recovery_date = d
+                break
+
+    # Underwater days: from peak of maxDD to recovery (or end)
+    date_index = {d: i for i, (d, _) in enumerate(pairs)}
+    start_i = date_index.get(max_peak_date, 0)
+    if recovery_date is not None:
+        end_i = date_index[recovery_date]
+    else:
+        end_i = len(pairs) - 1 if max_dd < 0 else start_i
+    underwater_days = max(0, end_i - start_i) if max_dd < 0 else 0
+
+    return {
+        "series": series,
+        "maxDD": max_dd,
+        "peakDate": max_peak_date if max_dd < 0 else pairs[0][0],
+        "troughDate": max_trough_date if max_dd < 0 else pairs[0][0],
+        "recoveryDate": recovery_date,
+        "underwaterDays": underwater_days,
+        "episodes": episodes,
+    }
+
+
+# Trading-day windows ≈ 1y / 3y / 5y / 10y
+ROLLING_WINDOWS = {
+    "1y": 252,
+    "3y": 756,
+    "5y": 1260,
+    "10y": 2520,
+}
+
+
+def rolling_cagr(curve, window: int = 756):
+    """Rolling CAGR over a trading-day window W.
+
+    At each end index t >= W: cagr = (v[t]/v[t-W])^(252/W) - 1.
+    Returns empty series when curve is shorter than window+1 points.
+    """
+    pairs = _curve_pairs(curve)
+    n = len(pairs)
+    if window <= 0 or n <= window:
+        return {"series": [], "min": None, "median": None, "max": None, "window": window}
+
+    series = []
+    cagrs = []
+    exp = 252.0 / window
+    for t in range(window, n):
+        v0 = pairs[t - window][1]
+        v1 = pairs[t][1]
+        if v0 <= 0 or v1 <= 0:
+            continue
+        cagr = (v1 / v0) ** exp - 1.0
+        series.append({"d": pairs[t][0], "cagr": cagr})
+        cagrs.append(cagr)
+
+    if not cagrs:
+        return {"series": [], "min": None, "median": None, "max": None, "window": window}
+
+    cagrs_sorted = sorted(cagrs)
+    mid = len(cagrs_sorted) // 2
+    if len(cagrs_sorted) % 2:
+        med = cagrs_sorted[mid]
+    else:
+        med = (cagrs_sorted[mid - 1] + cagrs_sorted[mid]) / 2.0
+
+    return {
+        "series": series,
+        "min": cagrs_sorted[0],
+        "median": med,
+        "max": cagrs_sorted[-1],
+        "window": window,
+    }
+
+
 def main():
     raw, prices = load()
     sample = {"069500": 0.4, "360750": 0.3, "148070": 0.2, "411060": 0.1}
