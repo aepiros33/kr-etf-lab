@@ -111,7 +111,7 @@ const state = {
   meta: null,
   prices: {},
   selected: {},
-  period: "5y",
+  period: "max",
   rebalance: "Q",
   momLookback: 1,
   momTopN: 3,
@@ -491,7 +491,7 @@ function periodBounds() {
   const customStart = $("#startDate").value,
     customEnd = $("#endDate").value;
   if (customStart && customEnd) return [customStart, customEnd];
-  const years = { "1y": 1, "3y": 3, "5y": 5, max: 20 }[state.period] || 5;
+  const years = { "1y": 1, "3y": 3, "5y": 5, "10y": 10, max: 25 }[state.period] || 5;
   const startDt = new Date(end + "T00:00:00");
   startDt.setFullYear(startDt.getFullYear() - years);
   return [startDt.toISOString().slice(0, 10), end];
