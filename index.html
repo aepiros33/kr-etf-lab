@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=qa3" />
+  <link rel="stylesheet" href="./styles.css?v=mom1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -33,9 +33,23 @@
           <select id="rebalance">
             <option value="Q" selected>분기 리밸런싱</option>
             <option value="Y">연 1회</option>
+            <option value="M">매월 고정</option>
+            <option value="MOM">월간 모멘텀</option>
             <option value="N">리밸런싱 없음</option>
           </select>
         </div>
+        <div class="row mom-row" id="momControls" style="display:none">
+          <label class="field">모멘텀 룩백
+            <select id="momLookback">
+              <option value="1" selected>1개월</option>
+              <option value="3">3개월</option>
+            </select>
+          </label>
+          <label class="field">상위 N
+            <input type="number" id="momTopN" min="1" max="20" step="1" value="3" />
+          </label>
+        </div>
+        <p class="muted-note" id="momHint" style="display:none">선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.</p>
         <div class="row" id="customDates" style="display:none">
           <input type="date" id="startDate" value="2021-01-01" />
           <input type="date" id="endDate" value="2026-09-23" />
@@ -107,6 +121,6 @@
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
     </p>
   </div>
-  <script src="./app.js?v=qa3"></script>
+  <script src="./app.js?v=mom1"></script>
 </body>
 </html>

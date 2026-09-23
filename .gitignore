@@ -5,6 +5,4 @@ __pycache__/
 venv/
 .idea/
 .vscode/
-data/etf_prices.json
-data/etf_meta.json
 data/prices/

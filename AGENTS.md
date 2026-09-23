@@ -31,11 +31,21 @@
 ## 데이터
 
 - 소스: FinanceDataReader (KRX/NAVER)
-- 메타: `data/etf_meta.json` (가벼움, UI 목록)
-- 종가: `data/prices/{code}.json` (선택 로드) + `data/etf_prices.json` (번들, reviewer 폴백)
-- 대용량이라 리포에 안 넣음. ingest로 생성
+- 메타: `data/etf_meta.json` (UI 목록) — GitHub Pages용으로 커밋 가능
+- 종가: `data/etf_prices.json` (번들, Pages/demo) + `data/prices/{code}.json` (선택 로드, gitignore)
+- Pages 데모를 위해 `etf_prices.json` / `etf_meta.json` 은 추적. `data/prices/` 만 무시
 - pykrx는 KRX 로그인 필요할 수 있어 기본 경로로 쓰지 말 것
 - 유니버스는 시총 상위 유동성 KRX ETF. 레버리지/인버스는 태그 달고 기본 프리셋에 넣지 말 것
+
+## 리밸런싱 모드
+
+| 코드 | 의미 |
+|---|---|
+| `Q` | 분기 리밸런싱 (목표 비중) |
+| `Y` | 연 1회 |
+| `M` | 매월 고정 비중 |
+| `MOM` | 월간 모멘텀 (전월 말 기준 1m/3m 수익률 상위 N 동일비중, 교체 시 0.1% 비용, 룩어헤드 금지) |
+| `N` | 없음 |
 
 ## 다음 작업 우선순위
 

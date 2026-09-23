@@ -391,7 +391,54 @@ def main():
     if len(tiny["series"]) != 4:
         fail(f"tiny rolling len {len(tiny['series'])}")
 
+
+    # --- Monthly fixed rebalance smoke ---
+    mixed_w = {"069500": 0.5, "114260": 0.5}
+    if "114260" not in prices:
+        alt = next((e["code"] for e in etfs if e.get("category") == "채권" and e["code"] in prices), None)
+        if not alt:
+            fail("채권 ETF 없음 — 월간 리밸런싱 테스트 불가")
+        mixed_w = {"069500": 0.5, alt: 0.5}
+    mixed_m = backtest(mixed_w, prices, start="2019-01-01", rebalance="M")
+    if len(mixed_m.curve) < 20:
+        fail("monthly rebalance curve too short")
+    if abs(mixed_m.curve[0][1] - mixed_n.curve[0][1]) > 1e-9:
+        fail("monthly rebalance day-0 mismatch")
+
+    # --- Momentum: single ticker + cost 0 ≈ buy-and-hold ---
+    mom_bh = backtest(
+        {"069500": 1.0}, prices, start="2019-01-01",
+        rebalance="MOM", mom_lookback=1, mom_top_n=1, mom_cost=0.0,
+    )
+    if abs(mom_bh.total_return - s.total_return) > 1e-6:
+        fail(f"MOM single-ticker != BH: {mom_bh.total_return} vs {s.total_return}")
+    if not mom_bh.mom_holdings or len(mom_bh.mom_holdings) < 2:
+        fail("MOM should return monthly holdings list")
+    for h in mom_bh.mom_holdings:
+        if h.get("codes") != ["069500"]:
+            fail(f"MOM single holdings unexpected: {h}")
+
+    # --- Momentum multi: holdings present + no look-ahead (signal uses prior month) ---
+    mom_uni = {c: 1.0 for c in ("069500", "360750", "148070", "411060") if c in prices}
+    if len(mom_uni) >= 3:
+        mom_m = backtest(
+            mom_uni, prices, start="2020-01-01",
+            rebalance="MOM", mom_lookback=3, mom_top_n=2, mom_cost=0.001,
+        )
+        if not mom_m.mom_holdings:
+            fail("MOM multi missing holdings")
+        for h in mom_m.mom_holdings:
+            if not h.get("codes") or not h.get("month"):
+                fail(f"MOM holdings row incomplete: {h}")
+            if len(h["codes"]) > 2:
+                fail(f"MOM topN violated: {h}")
+            # Weights equal
+            ws = list(h["weights"].values())
+            if ws and abs(sum(ws) - 1.0) > 1e-9:
+                fail(f"MOM weights not normalized: {h}")
+
     print("PASS")
+
     print(
         f"etfs={len(etfs)} prices={len(prices)} "
         f"kodex200_cagr={s.cagr:.2%} mdd={s.mdd:.2%} "

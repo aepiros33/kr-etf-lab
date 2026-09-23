@@ -36,6 +36,7 @@ class Stats:
     total_invested: float = 1.0
     final_value: float = 1.0
     contributions: int = 0
+    mom_holdings: list | None = None
 
 
 def load(codes: list[str] | None = None):
@@ -93,6 +94,8 @@ def _is_rebal(prev, cur, rebalance: str) -> bool:
     cy, cm, *_ = cur.split("-")
     if rebalance == "Y":
         return py != cy
+    if rebalance in ("M", "MOM"):
+        return prev[:7] != cur[:7]
     q = lambda m: (int(m) - 1) // 3
     return py != cy or q(pm) != q(cm)
 
@@ -103,6 +106,62 @@ def _is_new_month(prev, cur) -> bool:
     return prev[:7] != cur[:7]
 
 
+def _shift_month(ym: str, delta: int) -> str:
+    y, m = int(ym[:4]), int(ym[5:7])
+    m += delta
+    while m <= 0:
+        m += 12
+        y -= 1
+    while m > 12:
+        m -= 12
+        y += 1
+    return f"{y:04d}-{m:02d}"
+
+
+def _month_end_closes(price_map: dict[str, float]) -> dict[str, tuple[str, float]]:
+    """Map YYYY-MM -> (last_trading_day, close) for one ticker."""
+    by_m: dict[str, str] = {}
+    for d in price_map:
+        ym = d[:7]
+        if ym not in by_m or d > by_m[ym]:
+            by_m[ym] = d
+    return {ym: (d, price_map[d]) for ym, d in by_m.items()}
+
+
+def _momentum_pick(
+    universe: list[str],
+    prices: dict,
+    signal_month: str,
+    lookback: int,
+    top_n: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+) -> tuple[list[str], dict[str, float]]:
+    """Pick top-N by prior lookback return ending at prior month-end (no look-ahead)."""
+    end_ym = _shift_month(signal_month, -1)
+    start_ym = _shift_month(end_ym, -lookback)
+    scored: list[tuple[float, str]] = []
+    for c in universe:
+        ends = month_ends_cache.get(c) or {}
+        if end_ym not in ends or start_ym not in ends:
+            continue
+        _ed, end_px = ends[end_ym]
+        _sd, start_px = ends[start_ym]
+        if start_px <= 0 or end_px <= 0:
+            continue
+        # Sanity: end date must be strictly before signal month (no look-ahead)
+        if _ed[:7] >= signal_month:
+            continue
+        scored.append((end_px / start_px - 1.0, c))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked = [c for _r, c in scored[: max(1, top_n)]]
+    if not picked:
+        # Fallback: equal-weight whole universe that has a price history
+        picked = list(universe)
+    n = len(picked)
+    tw = {c: 1.0 / n for c in picked}
+    return picked, tw
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -111,12 +170,17 @@ def backtest(
     rebalance="Q",
     initial_capital: float = 1.0,
     monthly_contribution: float = 0.0,
+    mom_lookback: int = 1,
+    mom_top_n: int = 3,
+    mom_cost: float = 0.001,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
         raise ValueError("empty")
     if initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
+    if rebalance == "MOM" and not codes:
+        raise ValueError("모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.")
     total_w = sum(weights[c] for c in codes)
     tw = {c: weights[c] / total_w for c in codes}
     calendars = []
@@ -129,6 +193,11 @@ def backtest(
     if len(common) < 20:
         raise ValueError("공통 기간이 너무 짧습니다")
 
+    lookback = 3 if int(mom_lookback) >= 3 else 1
+    top_n = max(1, int(mom_top_n))
+    cost = max(0.0, float(mom_cost))
+    month_ends_cache = {c: _month_end_closes(prices[c]) for c in codes} if rebalance == "MOM" else {}
+
     units = None
     value = float(initial_capital)
     peak = value
@@ -139,16 +208,36 @@ def backtest(
     prev_value = None
     total_invested = float(initial_capital)
     contributions = 1
+    active_codes = list(codes)
+    prev_holdings: set[str] | None = None
+    mom_holdings: list[dict] = []
+    current_tw = dict(tw)
 
     for d in common:
-        px = {c: prices[c][d] for c in codes}
+        # Price map for currently held names (MOM may hold a subset)
+        hold = active_codes if units is not None else codes
         if units is None:
-            # Day 0: deploy initial capital to target weights.
-            units = {c: (tw[c] * value) / px[c] for c in codes}
-            value = sum(units[c] * px[c] for c in codes)
+            # Day 0
+            if rebalance == "MOM":
+                picked, current_tw = _momentum_pick(
+                    codes, prices, d[:7], lookback, top_n, month_ends_cache
+                )
+                active_codes = picked
+                units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+                prev_holdings = set(active_codes)
+                mom_holdings.append({
+                    "month": d[:7],
+                    "codes": list(active_codes),
+                    "weights": dict(current_tw),
+                })
+            else:
+                units = {c: (tw[c] * value) / prices[c][d] for c in codes}
+                active_codes = list(codes)
+                current_tw = dict(tw)
+            value = sum(units[c] * prices[c][d] for c in active_codes)
         else:
             # 1) Mark to market
-            value = sum(units[c] * px[c] for c in codes)
+            value = sum(units[c] * prices[c][d] for c in active_codes)
             if prev_value is not None and prev_value > 0:
                 rets.append((d, value / prev_value - 1.0))
 
@@ -162,8 +251,27 @@ def backtest(
 
             # 3) Rebalance after MTM (+ optional cash)
             if do_rebal:
-                units = {c: (tw[c] * value) / px[c] for c in codes}
-                value = sum(units[c] * px[c] for c in codes)
+                if rebalance == "MOM":
+                    picked, new_tw = _momentum_pick(
+                        codes, prices, d[:7], lookback, top_n, month_ends_cache
+                    )
+                    new_set = set(picked)
+                    if prev_holdings is not None and new_set != prev_holdings and cost > 0:
+                        value *= 1.0 - cost
+                    current_tw = new_tw
+                    active_codes = picked
+                    units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+                    prev_holdings = new_set
+                    mom_holdings.append({
+                        "month": d[:7],
+                        "codes": list(active_codes),
+                        "weights": dict(current_tw),
+                    })
+                else:
+                    units = {c: (tw[c] * value) / prices[c][d] for c in codes}
+                    active_codes = list(codes)
+                    current_tw = dict(tw)
+                value = sum(units[c] * prices[c][d] for c in active_codes)
 
         peak = max(peak, value)
         mdd = min(mdd, value / peak - 1.0)
@@ -241,6 +349,7 @@ def backtest(
         total_invested=total_invested,
         final_value=end_v,
         contributions=contributions,
+        mom_holdings=mom_holdings if rebalance == "MOM" else None,
     )
 
 
