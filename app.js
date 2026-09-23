@@ -488,9 +488,13 @@ async function ensurePrices(codes) {
 function periodBounds() {
   const ends = state.meta.etfs.map((e) => e.end).filter(Boolean).sort();
   const end = ends.at(-1);
-  const customStart = $("#startDate").value,
-    customEnd = $("#endDate").value;
-  if (customStart && customEnd) return [customStart, customEnd];
+  // Custom dates only when period === "custom". Hidden inputs still have
+  // default values (e.g. 2021-01-01) which must NOT override 10y/max.
+  if (state.period === "custom") {
+    const customStart = $("#startDate").value;
+    const customEnd = $("#endDate").value;
+    if (customStart && customEnd) return [customStart, customEnd];
+  }
   const years = { "1y": 1, "3y": 3, "5y": 5, "10y": 10, max: 25 }[state.period] || 5;
   const startDt = new Date(end + "T00:00:00");
   startDt.setFullYear(startDt.getFullYear() - years);
@@ -1947,6 +1951,8 @@ function reviewAgent(r, bench, picks) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  const periodEl = $("#period");
+  if (periodEl && periodEl.value) state.period = periodEl.value;
   $("#period").onchange = (e) => {
     state.period = e.target.value;
     $("#customDates").style.display = e.target.value === "custom" ? "flex" : "none";
