@@ -255,6 +255,22 @@ async function applyPreset(key) {
   await run();
 }
 
+
+function clearSelection() {
+  state.selected = {};
+  document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
+  renderList();
+  destroyExtraCharts();
+  if (state.chart) {
+    state.chart.destroy();
+    state.chart = null;
+  }
+  state.lastPortCurve = null;
+  state.lastBenchCurve = null;
+  const host = $("#result");
+  if (host) host.innerHTML = `<div class="card pad empty">종목을 선택하거나 프리셋을 고른 뒤 백테스트를 실행하세요.</div>`;
+}
+
 function filteredEtfs() {
   const q = state.search.trim().toLowerCase();
   return state.meta.etfs.filter((etf) => {
@@ -1242,6 +1258,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#pensionTaxRate").onchange = (e) => {
     state.pensionTaxRate = Number(e.target.value) || 0.044;
   };
+  $("#clearSelection").onclick = () => clearSelection();
   $("#run").onclick = () => run();
   boot().catch((err) => {
     $("#result").innerHTML = `<div class="card pad empty">${err.message || err}</div>`;

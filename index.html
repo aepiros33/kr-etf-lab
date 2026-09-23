@@ -92,7 +92,10 @@
         <div class="etf-list" id="etfList"></div>
         <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화 · 시세는 선택 종목만 로드</span></div>
         <div id="irpWarn" class="irp-warn" style="display:none"></div>
-        <button class="primary" id="run">백테스트 실행</button>
+        <div class="btn-row">
+          <button type="button" class="secondary" id="clearSelection">선택 초기화</button>
+          <button type="button" class="primary" id="run">백테스트 실행</button>
+        </div>
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
     </div>
