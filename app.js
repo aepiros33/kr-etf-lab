@@ -259,16 +259,34 @@ async function applyPreset(key) {
 function clearSelection() {
   state.selected = {};
   document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
+  // Force DOM checkboxes off even before re-render (visible feedback).
+  document.querySelectorAll("#etfList input[type=checkbox]").forEach((el) => {
+    el.checked = false;
+  });
+  document.querySelectorAll("#etfList input[type=range]").forEach((el) => {
+    el.value = "0";
+  });
+  document.querySelectorAll("#etfList .wnum").forEach((el) => {
+    el.textContent = "0%";
+  });
   renderList();
-  destroyExtraCharts();
-  if (state.chart) {
-    state.chart.destroy();
-    state.chart = null;
+  updateSum();
+  updateIrpWarn();
+  try {
+    destroyExtraCharts();
+    if (state.chart) {
+      state.chart.destroy();
+      state.chart = null;
+    }
+  } catch (_) {
+    /* chart teardown must not block reset */
   }
   state.lastPortCurve = null;
   state.lastBenchCurve = null;
   const host = $("#result");
-  if (host) host.innerHTML = `<div class="card pad empty">종목을 선택하거나 프리셋을 고른 뒤 백테스트를 실행하세요.</div>`;
+  if (host) {
+    host.innerHTML = `<div class="card pad empty">종목을 선택하거나 프리셋을 고른 뒤 백테스트를 실행하세요.</div>`;
+  }
 }
 
 function filteredEtfs() {
@@ -313,8 +331,16 @@ function renderList() {
     const range = el.querySelector("input[type=range]");
     if (range)
       range.oninput = (e) => {
-        state.selected[etf.code] = Number(e.target.value);
-        el.querySelector(".wnum").textContent = e.target.value + "%";
+        const w = Number(e.target.value);
+        if (w <= 0) {
+          delete state.selected[etf.code];
+          el.querySelector("input[type=checkbox]").checked = false;
+          el.classList.remove("on");
+          el.querySelector(".weight-row").style.display = "none";
+        } else {
+          state.selected[etf.code] = w;
+          el.querySelector(".wnum").textContent = w + "%";
+        }
         updateSum();
         updateIrpWarn();
       };
@@ -1258,7 +1284,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#pensionTaxRate").onchange = (e) => {
     state.pensionTaxRate = Number(e.target.value) || 0.044;
   };
-  $("#clearSelection").onclick = () => clearSelection();
+  const clearBtn = document.getElementById("clearSelection");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      clearSelection();
+    });
+  }
   $("#run").onclick = () => run();
   boot().catch((err) => {
     $("#result").innerHTML = `<div class="card pad empty">${err.message || err}</div>`;
