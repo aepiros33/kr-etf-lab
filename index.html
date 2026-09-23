@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=mom1" />
+  <link rel="stylesheet" href="./styles.css?v=strat3" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -35,6 +35,7 @@
             <option value="Y">연 1회</option>
             <option value="M">매월 고정</option>
             <option value="MOM">월간 모멘텀</option>
+            <option value="DMOM">듀얼 모멘텀</option>
             <option value="N">리밸런싱 없음</option>
           </select>
         </div>
@@ -49,7 +50,40 @@
             <input type="number" id="momTopN" min="1" max="20" step="1" value="3" />
           </label>
         </div>
+        <div class="row mom-row" id="dmomCashRow" style="display:none">
+          <label class="field">안전자산(현금 대리)
+            <select id="cashCode">
+              <option value="214980" selected>214980 KODEX 단기채권PLUS</option>
+              <option value="423160">423160 KODEX KOFR</option>
+              <option value="449170">449170 TIGER KOFR</option>
+            </select>
+          </label>
+        </div>
         <p class="muted-note" id="momHint" style="display:none">선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.</p>
+
+        <div class="section-title">비중·국면</div>
+        <div class="row mom-row">
+          <label class="field">비중 방식
+            <select id="weighting">
+              <option value="fixed" selected>고정(입력비중)</option>
+              <option value="invVol">역변동성</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">역변동성은 리밸런싱 직전 60거래일 실현변동성 역수 비중입니다. 모멘텀/듀얼 편입 집합에도 적용됩니다.</p>
+        <label class="toggle">
+          <input type="checkbox" id="maOverlay" />
+          <span>이동평균 트렌드 오버레이 (벤치마크 069500)</span>
+        </label>
+        <div class="row mom-row" id="maOverlayRow" style="display:none">
+          <label class="field">MA 길이
+            <select id="maWindow">
+              <option value="100">100</option>
+              <option value="200" selected>200</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">MA 길이는 민감합니다. 과거 국면 표시용이며 투자 권유가 아닙니다.</p>
         <div class="row" id="customDates" style="display:none">
           <input type="date" id="startDate" value="2021-01-01" />
           <input type="date" id="endDate" value="2026-09-23" />
@@ -114,13 +148,14 @@
       <main id="result"><div class="card pad empty">계산 중…</div></main>
     </div>
     <p class="foot">
-      투자 자문이 아닙니다. 과거 수익률은 미래 수익을 보장하지 않습니다.
+      시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.
+      모멘텀·역변동성·이동평균 등 파라미터는 민감합니다. 특정 설정을 따라가면 수익이 난다는 뜻이 아닙니다.
       시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
       Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
     </p>
   </div>
-  <script src="./app.js?v=mom1"></script>
+  <script src="./app.js?v=strat3"></script>
 </body>
 </html>

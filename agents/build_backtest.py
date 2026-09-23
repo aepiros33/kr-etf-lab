@@ -7,6 +7,7 @@ Monthly DCA: on first trading day of each month, add cash then buy to target wei
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -37,6 +38,8 @@ class Stats:
     final_value: float = 1.0
     contributions: int = 0
     mom_holdings: list | None = None
+    last_regime: str | None = None
+    regime_log: list | None = None
 
 
 def load(codes: list[str] | None = None):
@@ -94,7 +97,7 @@ def _is_rebal(prev, cur, rebalance: str) -> bool:
     cy, cm, *_ = cur.split("-")
     if rebalance == "Y":
         return py != cy
-    if rebalance in ("M", "MOM"):
+    if rebalance in ("M", "MOM", "DMOM"):
         return prev[:7] != cur[:7]
     q = lambda m: (int(m) - 1) // 3
     return py != cy or q(pm) != q(cm)
@@ -162,6 +165,152 @@ def _momentum_pick(
     return picked, tw
 
 
+def _lookback_return(
+    code: str,
+    signal_month: str,
+    lookback: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+) -> float | None:
+    end_ym = _shift_month(signal_month, -1)
+    start_ym = _shift_month(end_ym, -lookback)
+    ends = month_ends_cache.get(code) or {}
+    if end_ym not in ends or start_ym not in ends:
+        return None
+    _ed, end_px = ends[end_ym]
+    _sd, start_px = ends[start_ym]
+    if start_px <= 0 or end_px <= 0:
+        return None
+    if _ed[:7] >= signal_month:
+        return None
+    return end_px / start_px - 1.0
+
+
+def _dual_momentum_pick(
+    universe: list[str],
+    prices: dict,
+    signal_month: str,
+    lookback: int,
+    top_n: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+    cash_code: str,
+) -> tuple[list[str], dict[str, float]]:
+    """Relative MOM top-N, then per-name absolute filter vs cash (swap losers to cash)."""
+    end_ym = _shift_month(signal_month, -1)
+    start_ym = _shift_month(end_ym, -lookback)
+    scored: list[tuple[float, str]] = []
+    for c in universe:
+        ends = month_ends_cache.get(c) or {}
+        if end_ym not in ends or start_ym not in ends:
+            continue
+        _ed, end_px = ends[end_ym]
+        _sd, start_px = ends[start_ym]
+        if start_px <= 0 or end_px <= 0:
+            continue
+        if _ed[:7] >= signal_month:
+            continue
+        scored.append((end_px / start_px - 1.0, c))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked_scored = scored[: max(1, top_n)]
+    if not picked_scored:
+        return [cash_code], {cash_code: 1.0}
+
+    cash_ret = _lookback_return(cash_code, signal_month, lookback, month_ends_cache)
+    slots: list[str] = []
+    for ret, c in picked_scored:
+        if cash_ret is not None and ret <= cash_ret:
+            slots.append(cash_code)
+        else:
+            slots.append(c)
+    n = len(slots)
+    tw: dict[str, float] = {}
+    for c in slots:
+        tw[c] = tw.get(c, 0.0) + 1.0 / n
+    return list(tw.keys()), tw
+
+
+def _trailing_vol(price_map: dict[str, float], asof: str, window: int = 60) -> float | None:
+    """Realized vol from daily log returns over `window` days ending before asof (no look-ahead)."""
+    dates = sorted(d for d in price_map if d < asof)
+    if len(dates) < window + 1:
+        return None
+    use = dates[-(window + 1) :]
+    logs: list[float] = []
+    for a, b in zip(use, use[1:]):
+        pa, pb = price_map[a], price_map[b]
+        if pa <= 0 or pb <= 0:
+            return None
+        logs.append(math.log(pb / pa))
+    if len(logs) < 2:
+        return None
+    sig = statistics.stdev(logs)
+    if sig < 1e-15:
+        return None
+    return sig
+
+
+def _inv_vol_weights(
+    codes: list[str],
+    prices: dict,
+    asof: str,
+    window: int = 60,
+    fallback_tw: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Weight ∝ 1/σ; skip σ≈0 / short history; fallback equal among remaining or fallback_tw."""
+    vols: dict[str, float] = {}
+    for c in codes:
+        if c not in prices:
+            continue
+        v = _trailing_vol(prices[c], asof, window)
+        if v is not None:
+            vols[c] = v
+    if not vols:
+        if fallback_tw:
+            return {c: fallback_tw[c] for c in codes if c in fallback_tw} or dict(fallback_tw)
+        n = len(codes)
+        return {c: 1.0 / n for c in codes} if n else {}
+    inv = {c: 1.0 / v for c, v in vols.items()}
+    s = sum(inv.values())
+    return {c: inv[c] / s for c in inv}
+
+
+def _ma_risk_on(bench_prices: dict[str, float], asof: str, window: int = 200) -> bool:
+    """Risk-on if prior close >= SMA(window) using closes strictly before asof."""
+    dates = sorted(d for d in bench_prices if d < asof)
+    if len(dates) < window:
+        return True  # insufficient history → leave strategy weights unchanged
+    window_dates = dates[-window:]
+    sma = sum(bench_prices[d] for d in window_dates) / window
+    prior = bench_prices[dates[-1]]
+    return prior >= sma
+
+
+def _apply_ma_overlay(
+    tw: dict[str, float],
+    risk_on: bool,
+    cash_code: str,
+    ma_cash_pct: float,
+) -> dict[str, float]:
+    if risk_on:
+        return dict(tw)
+    cash_pct = min(1.0, max(0.0, float(ma_cash_pct)))
+    scale = 1.0 - cash_pct
+    out: dict[str, float] = {}
+    for c, w in tw.items():
+        if c == cash_code:
+            continue
+        nw = w * scale
+        if nw > 0:
+            out[c] = nw
+    out[cash_code] = out.get(cash_code, 0.0) + cash_pct
+    s = sum(out.values())
+    if s <= 0:
+        return {cash_code: 1.0}
+    return {c: w / s for c, w in out.items()}
+
+
+BENCH_CODE = "069500"
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -173,18 +322,37 @@ def backtest(
     mom_lookback: int = 1,
     mom_top_n: int = 3,
     mom_cost: float = 0.001,
+    weighting: str = "fixed",
+    vol_window: int = 60,
+    ma_overlay: bool = False,
+    ma_window: int = 200,
+    cash_code: str = "214980",
+    ma_cash_pct: float = 1.0,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
         raise ValueError("empty")
     if initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
-    if rebalance == "MOM" and not codes:
+    if rebalance in ("MOM", "DMOM") and not codes:
         raise ValueError("모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.")
+
+    need_cash = rebalance == "DMOM" or ma_overlay
+    if need_cash:
+        if cash_code not in prices:
+            raise ValueError(f"안전자산 {cash_code} 시세가 없습니다")
+    if ma_overlay and BENCH_CODE not in prices:
+        raise ValueError(f"벤치마크 {BENCH_CODE} 시세가 없습니다")
+
     total_w = sum(weights[c] for c in codes)
     tw = {c: weights[c] / total_w for c in codes}
+
+    calendar_codes = list(codes)
+    if need_cash and cash_code not in calendar_codes:
+        calendar_codes.append(cash_code)
+
     calendars = []
-    for c in codes:
+    for c in calendar_codes:
         ds = sorted(d for d in prices[c] if start <= d <= end)
         if len(ds) < 20:
             raise ValueError(f"{c} 데이터 부족")
@@ -196,7 +364,17 @@ def backtest(
     lookback = 3 if int(mom_lookback) >= 3 else 1
     top_n = max(1, int(mom_top_n))
     cost = max(0.0, float(mom_cost))
-    month_ends_cache = {c: _month_end_closes(prices[c]) for c in codes} if rebalance == "MOM" else {}
+    vol_win = max(2, int(vol_window))
+    ma_win = max(2, int(ma_window))
+    use_inv = weighting == "invVol"
+    mom_like = rebalance in ("MOM", "DMOM")
+
+    month_ends_codes = list(codes)
+    if rebalance == "DMOM" and cash_code not in month_ends_codes:
+        month_ends_codes.append(cash_code)
+    month_ends_cache = (
+        {c: _month_end_closes(prices[c]) for c in month_ends_codes} if mom_like else {}
+    )
 
     units = None
     value = float(initial_capital)
@@ -212,28 +390,49 @@ def backtest(
     prev_holdings: set[str] | None = None
     mom_holdings: list[dict] = []
     current_tw = dict(tw)
+    last_regime: str | None = None
+    regime_log: list[dict] = []
+
+    def _target_weights(d: str) -> tuple[dict[str, float], list[str]]:
+        nonlocal last_regime
+        if rebalance == "MOM":
+            _picked, base = _momentum_pick(
+                codes, prices, d[:7], lookback, top_n, month_ends_cache
+            )
+        elif rebalance == "DMOM":
+            _picked, base = _dual_momentum_pick(
+                codes, prices, d[:7], lookback, top_n, month_ends_cache, cash_code
+            )
+        else:
+            base = dict(tw)
+            _picked = list(codes)
+
+        if use_inv:
+            base = _inv_vol_weights(list(base.keys()), prices, d, vol_win, fallback_tw=base)
+
+        if ma_overlay:
+            risk_on = _ma_risk_on(prices[BENCH_CODE], d, ma_win)
+            last_regime = "on" if risk_on else "off"
+            regime_log.append({"date": d, "regime": last_regime})
+            base = _apply_ma_overlay(base, risk_on, cash_code, ma_cash_pct)
+        elif last_regime is None:
+            last_regime = None
+
+        active = [c for c, w in base.items() if w > 0]
+        return base, active
 
     for d in common:
-        # Price map for currently held names (MOM may hold a subset)
-        hold = active_codes if units is not None else codes
         if units is None:
             # Day 0
-            if rebalance == "MOM":
-                picked, current_tw = _momentum_pick(
-                    codes, prices, d[:7], lookback, top_n, month_ends_cache
-                )
-                active_codes = picked
-                units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
-                prev_holdings = set(active_codes)
+            current_tw, active_codes = _target_weights(d)
+            units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+            prev_holdings = set(active_codes)
+            if mom_like:
                 mom_holdings.append({
                     "month": d[:7],
                     "codes": list(active_codes),
                     "weights": dict(current_tw),
                 })
-            else:
-                units = {c: (tw[c] * value) / prices[c][d] for c in codes}
-                active_codes = list(codes)
-                current_tw = dict(tw)
             value = sum(units[c] * prices[c][d] for c in active_codes)
         else:
             # 1) Mark to market
@@ -251,26 +450,20 @@ def backtest(
 
             # 3) Rebalance after MTM (+ optional cash)
             if do_rebal:
-                if rebalance == "MOM":
-                    picked, new_tw = _momentum_pick(
-                        codes, prices, d[:7], lookback, top_n, month_ends_cache
-                    )
-                    new_set = set(picked)
-                    if prev_holdings is not None and new_set != prev_holdings and cost > 0:
-                        value *= 1.0 - cost
-                    current_tw = new_tw
-                    active_codes = picked
-                    units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
-                    prev_holdings = new_set
+                new_tw, new_active = _target_weights(d)
+                new_set = set(new_active)
+                if mom_like and prev_holdings is not None and new_set != prev_holdings and cost > 0:
+                    value *= 1.0 - cost
+                current_tw = new_tw
+                active_codes = new_active
+                units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+                prev_holdings = new_set
+                if mom_like:
                     mom_holdings.append({
                         "month": d[:7],
                         "codes": list(active_codes),
                         "weights": dict(current_tw),
                     })
-                else:
-                    units = {c: (tw[c] * value) / prices[c][d] for c in codes}
-                    active_codes = list(codes)
-                    current_tw = dict(tw)
                 value = sum(units[c] * prices[c][d] for c in active_codes)
 
         peak = max(peak, value)
@@ -349,8 +542,11 @@ def backtest(
         total_invested=total_invested,
         final_value=end_v,
         contributions=contributions,
-        mom_holdings=mom_holdings if rebalance == "MOM" else None,
+        mom_holdings=mom_holdings if mom_like else None,
+        last_regime=last_regime if ma_overlay else None,
+        regime_log=regime_log if ma_overlay else None,
     )
+
 
 
 

@@ -120,6 +120,12 @@ const state = {
   rebalance: "Q",
   momLookback: 1,
   momTopN: 3,
+  weighting: "fixed",
+  volWindow: 60,
+  maOverlay: false,
+  maWindow: 200,
+  cashCode: "214980",
+  maCashPct: 1.0,
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -650,20 +656,28 @@ async function run() {
   const picks = Object.entries(state.selected).filter(([, w]) => w > 0);
   if (!picks.length) return;
   const codes = picks.map(([c]) => c);
-  await ensurePrices(codes);
+  const needCash = state.rebalance === "DMOM" || state.maOverlay;
+  const extra = [BENCH];
+  if (needCash) extra.push(state.cashCode || "214980");
+  await ensurePrices([...codes, ...extra]);
   for (const c of codes) {
     if (!state.prices[c]) {
       $("#result").innerHTML = `<div class="card pad empty">${c} 시세가 없습니다. fast_ingest 를 다시 실행하세요.</div>`;
       return;
     }
   }
+  if (needCash && !state.prices[state.cashCode || "214980"]) {
+    $("#result").innerHTML = `<div class="card pad empty">안전자산 ${state.cashCode} 시세가 없습니다.</div>`;
+    return;
+  }
   const [start, end] = periodBounds();
   const initial = state.dcaOn ? state.initialCapital : 1;
   const monthly = state.dcaOn ? state.monthlyAmount : 0;
+  const loadCodes = [...new Set([...codes, BENCH, ...(needCash ? [state.cashCode || "214980"] : [])])];
   const priceMap = state.totalReturn
-    ? buildTotalReturnPrices(state.prices, [...codes, BENCH])
+    ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
-  if (state.rebalance === "MOM" && !picks.length) {
+  if ((state.rebalance === "MOM" || state.rebalance === "DMOM") && !picks.length) {
     $("#result").innerHTML = `<div class="card pad empty">모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.</div>`;
     return;
   }
@@ -675,7 +689,17 @@ async function run() {
     state.rebalance,
     initial,
     monthly,
-    { lookback: state.momLookback, topN: state.momTopN, cost: 0.001 }
+    {
+      lookback: state.momLookback,
+      topN: state.momTopN,
+      cost: 0.001,
+      weighting: state.weighting,
+      volWindow: state.volWindow,
+      maOverlay: state.maOverlay,
+      maWindow: state.maWindow,
+      cashCode: state.cashCode || "214980",
+      maCashPct: state.maCashPct,
+    }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
   const corr = result.error ? null : buildCorrMatrix(codes, result.start || start, result.end || end);
@@ -760,10 +784,123 @@ function momentumPick(universe, priceMap, signalMonth, lookback, topN, monthEnds
   return [picked, tw];
 }
 
+function lookbackReturn(code, signalMonth, lookback, monthEndsCache) {
+  const endYm = shiftMonth(signalMonth, -1);
+  const startYm = shiftMonth(endYm, -lookback);
+  const ends = monthEndsCache[code] || {};
+  if (!ends[endYm] || !ends[startYm]) return null;
+  const [ed, endPx] = ends[endYm];
+  const [, startPx] = ends[startYm];
+  if (!(startPx > 0) || !(endPx > 0)) return null;
+  if (ed.slice(0, 7) >= signalMonth) return null;
+  return endPx / startPx - 1;
+}
+
+function dualMomentumPick(universe, priceMap, signalMonth, lookback, topN, monthEndsCache, cashCode) {
+  const endYm = shiftMonth(signalMonth, -1);
+  const startYm = shiftMonth(endYm, -lookback);
+  const scored = [];
+  for (const c of universe) {
+    const ends = monthEndsCache[c] || {};
+    if (!ends[endYm] || !ends[startYm]) continue;
+    const [ed, endPx] = ends[endYm];
+    const [, startPx] = ends[startYm];
+    if (!(startPx > 0) || !(endPx > 0)) continue;
+    if (ed.slice(0, 7) >= signalMonth) continue;
+    scored.push([endPx / startPx - 1, c]);
+  }
+  scored.sort((a, b) => b[0] - a[0] || (a[1] < b[1] ? -1 : 1));
+  const pickedScored = scored.slice(0, Math.max(1, topN));
+  if (!pickedScored.length) return [[cashCode], { [cashCode]: 1 }];
+  const cashRet = lookbackReturn(cashCode, signalMonth, lookback, monthEndsCache);
+  const slots = [];
+  for (const [ret, c] of pickedScored) {
+    if (cashRet != null && ret <= cashRet) slots.push(cashCode);
+    else slots.push(c);
+  }
+  const n = slots.length;
+  const tw = {};
+  for (const c of slots) tw[c] = (tw[c] || 0) + 1 / n;
+  return [Object.keys(tw), tw];
+}
+
+function trailingVol(priceMap, asof, window = 60) {
+  const dates = Object.keys(priceMap)
+    .filter((d) => d < asof)
+    .sort();
+  if (dates.length < window + 1) return null;
+  const use = dates.slice(-(window + 1));
+  const logs = [];
+  for (let i = 1; i < use.length; i++) {
+    const pa = priceMap[use[i - 1]];
+    const pb = priceMap[use[i]];
+    if (!(pa > 0) || !(pb > 0)) return null;
+    logs.push(Math.log(pb / pa));
+  }
+  if (logs.length < 2) return null;
+  const mean = logs.reduce((a, b) => a + b, 0) / logs.length;
+  const variance = logs.reduce((a, b) => a + (b - mean) ** 2, 0) / (logs.length - 1);
+  const sig = Math.sqrt(variance);
+  if (!(sig > 1e-15)) return null;
+  return sig;
+}
+
+function invVolWeights(codes, priceMap, asof, window = 60, fallbackTw = null) {
+  const vols = {};
+  for (const c of codes) {
+    if (!priceMap[c]) continue;
+    const v = trailingVol(priceMap[c], asof, window);
+    if (v != null) vols[c] = v;
+  }
+  const keys = Object.keys(vols);
+  if (!keys.length) {
+    if (fallbackTw) {
+      const out = {};
+      for (const c of codes) if (fallbackTw[c] != null) out[c] = fallbackTw[c];
+      return Object.keys(out).length ? out : { ...fallbackTw };
+    }
+    const n = codes.length;
+    return Object.fromEntries(codes.map((c) => [c, 1 / n]));
+  }
+  const inv = Object.fromEntries(keys.map((c) => [c, 1 / vols[c]]));
+  const s = keys.reduce((a, c) => a + inv[c], 0);
+  return Object.fromEntries(keys.map((c) => [c, inv[c] / s]));
+}
+
+function maRiskOn(benchPrices, asof, window = 200) {
+  const dates = Object.keys(benchPrices)
+    .filter((d) => d < asof)
+    .sort();
+  if (dates.length < window) return true;
+  const windowDates = dates.slice(-window);
+  let sum = 0;
+  for (const d of windowDates) sum += benchPrices[d];
+  const sma = sum / window;
+  const prior = benchPrices[dates[dates.length - 1]];
+  return prior >= sma;
+}
+
+function applyMaOverlay(tw, riskOn, cashCode, maCashPct) {
+  if (riskOn) return { ...tw };
+  const cashPct = Math.min(1, Math.max(0, Number(maCashPct)));
+  const scale = 1 - cashPct;
+  const out = {};
+  for (const [c, w] of Object.entries(tw)) {
+    if (c === cashCode) continue;
+    const nw = w * scale;
+    if (nw > 0) out[c] = nw;
+  }
+  out[cashCode] = (out[cashCode] || 0) + cashPct;
+  const s = Object.values(out).reduce((a, b) => a + b, 0);
+  if (!(s > 0)) return { [cashCode]: 1 };
+  return Object.fromEntries(Object.entries(out).map(([c, w]) => [c, w / s]));
+}
+
 /**
  * Same-day: mark-to-market THEN rebalance.
  * DCA: on first trading day of each new month, add cash then buy to target weights.
- * MOM: monthly momentum top-N equal weight; turnover cost applied when holdings change.
+ * MOM/DMOM: monthly momentum; turnover cost when holdings set changes.
+ * weighting invVol / maOverlay applied on rebalance days (and day 0).
  * Numbers are computed only here (and in agents/build_backtest.py).
  */
 function backtest(
@@ -774,13 +911,36 @@ function backtest(
   rebalance,
   initialCapital = 1,
   monthlyContribution = 0,
-  momOpts = {}
+  opts = {}
 ) {
   const codes = Object.keys(weights).filter((c) => weights[c] > 0);
   if (!codes.length) return { error: "ETF를 선택하세요." };
   const total = codes.reduce((s, c) => s + weights[c], 0);
   const tw = Object.fromEntries(codes.map((c) => [c, weights[c] / total]));
-  const sets = codes.map(
+
+  const lookback = Number(opts.lookback) >= 3 ? 3 : 1;
+  const topN = Math.max(1, Number(opts.topN) || 3);
+  const momCost = Math.max(0, Number(opts.cost ?? 0.001));
+  const weighting = opts.weighting === "invVol" ? "invVol" : "fixed";
+  const volWindow = Math.max(2, Number(opts.volWindow) || 60);
+  const maOverlay = !!opts.maOverlay;
+  const maWindow = Math.max(2, Number(opts.maWindow) || 200);
+  const cashCode = opts.cashCode || "214980";
+  const maCashPct = opts.maCashPct != null ? Number(opts.maCashPct) : 1.0;
+  const momLike = rebalance === "MOM" || rebalance === "DMOM";
+  const needCash = rebalance === "DMOM" || maOverlay;
+
+  if (needCash && !priceMap[cashCode]) {
+    return { error: `안전자산 ${cashCode} 시세가 없습니다.` };
+  }
+  if (maOverlay && !priceMap[BENCH]) {
+    return { error: `벤치마크 ${BENCH} 시세가 없습니다.` };
+  }
+
+  const calendarCodes = [...codes];
+  if (needCash && !calendarCodes.includes(cashCode)) calendarCodes.push(cashCode);
+
+  const sets = calendarCodes.map(
     (c) => new Set(Object.keys(priceMap[c] || {}).filter((d) => d >= start && d <= end))
   );
   let common = [...sets[0]];
@@ -789,13 +949,11 @@ function backtest(
   if (common.length < 20)
     return { error: "선택한 ETF의 공통 상장 기간이 너무 짧습니다. 기간을 줄이거나 종목을 바꿔보세요." };
 
-  const lookback = Number(momOpts.lookback) >= 3 ? 3 : 1;
-  const topN = Math.max(1, Number(momOpts.topN) || 3);
-  const momCost = Math.max(0, Number(momOpts.cost ?? 0.001));
-  const monthEndsCache =
-    rebalance === "MOM"
-      ? Object.fromEntries(codes.map((c) => [c, monthEndCloses(priceMap[c])]))
-      : {};
+  const monthEndsCodes = [...codes];
+  if (rebalance === "DMOM" && !monthEndsCodes.includes(cashCode)) monthEndsCodes.push(cashCode);
+  const monthEndsCache = momLike
+    ? Object.fromEntries(monthEndsCodes.map((c) => [c, monthEndCloses(priceMap[c])]))
+    : {};
 
   const q = (m) => Math.floor((Number(m) - 1) / 3);
   const isRebal = (prev, cur) => {
@@ -804,7 +962,8 @@ function backtest(
     const [py, pm] = prev.split("-"),
       [cy, cm] = cur.split("-");
     if (rebalance === "Y") return py !== cy;
-    if (rebalance === "M" || rebalance === "MOM") return prev.slice(0, 7) !== cur.slice(0, 7);
+    if (rebalance === "M" || rebalance === "MOM" || rebalance === "DMOM")
+      return prev.slice(0, 7) !== cur.slice(0, 7);
     return py !== cy || q(pm) !== q(cm);
   };
   const isNewMonth = (prev, cur) => prev && prev.slice(0, 7) !== cur.slice(0, 7);
@@ -821,22 +980,48 @@ function backtest(
   let currentTw = { ...tw };
   let prevHoldings = null;
   const momHoldings = [];
+  const regimeLog = [];
+  let lastRegime = null;
   const curve = [],
     rets = [];
 
+  function targetWeights(d) {
+    let base;
+    if (rebalance === "MOM") {
+      [, base] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
+    } else if (rebalance === "DMOM") {
+      [, base] = dualMomentumPick(
+        codes,
+        priceMap,
+        d.slice(0, 7),
+        lookback,
+        topN,
+        monthEndsCache,
+        cashCode
+      );
+    } else {
+      base = { ...tw };
+    }
+    if (weighting === "invVol") {
+      base = invVolWeights(Object.keys(base), priceMap, d, volWindow, base);
+    }
+    if (maOverlay) {
+      const riskOn = maRiskOn(priceMap[BENCH], d, maWindow);
+      lastRegime = riskOn ? "on" : "off";
+      regimeLog.push({ date: d, regime: lastRegime });
+      base = applyMaOverlay(base, riskOn, cashCode, maCashPct);
+    }
+    const active = Object.keys(base).filter((c) => base[c] > 0);
+    return [base, active];
+  }
+
   for (const d of common) {
     if (!units) {
-      if (rebalance === "MOM") {
-        const [picked, mtw] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
-        activeCodes = picked;
-        currentTw = mtw;
-        units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
-        prevHoldings = new Set(activeCodes);
+      [currentTw, activeCodes] = targetWeights(d);
+      units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
+      prevHoldings = new Set(activeCodes);
+      if (momLike) {
         momHoldings.push({ month: d.slice(0, 7), codes: [...activeCodes], weights: { ...currentTw } });
-      } else {
-        units = Object.fromEntries(codes.map((c) => [c, (tw[c] * value) / priceMap[c][d]]));
-        activeCodes = [...codes];
-        currentTw = { ...tw };
       }
       value = activeCodes.reduce((s, c) => s + units[c] * priceMap[c][d], 0);
     } else {
@@ -853,22 +1038,18 @@ function backtest(
         doRebal = true;
       }
       if (doRebal) {
-        if (rebalance === "MOM") {
-          const [picked, mtw] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
-          const newSet = new Set(picked);
-          const changed =
-            prevHoldings &&
-            (newSet.size !== prevHoldings.size || [...newSet].some((c) => !prevHoldings.has(c)));
-          if (changed && momCost > 0) value *= 1 - momCost;
-          currentTw = mtw;
-          activeCodes = picked;
-          units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
-          prevHoldings = newSet;
+        const [newTw, newActive] = targetWeights(d);
+        const newSet = new Set(newActive);
+        const changed =
+          prevHoldings &&
+          (newSet.size !== prevHoldings.size || [...newSet].some((c) => !prevHoldings.has(c)));
+        if (momLike && changed && momCost > 0) value *= 1 - momCost;
+        currentTw = newTw;
+        activeCodes = newActive;
+        units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
+        prevHoldings = newSet;
+        if (momLike) {
           momHoldings.push({ month: d.slice(0, 7), codes: [...activeCodes], weights: { ...currentTw } });
-        } else {
-          units = Object.fromEntries(codes.map((c) => [c, (tw[c] * value) / priceMap[c][d]]));
-          activeCodes = [...codes];
-          currentTw = { ...tw };
         }
         value = activeCodes.reduce((s, c) => s + units[c] * priceMap[c][d], 0);
       }
@@ -946,7 +1127,9 @@ function backtest(
     contributions,
     initialCapital,
     monthlyContribution,
-    momHoldings: rebalance === "MOM" ? momHoldings : null,
+    momHoldings: momLike ? momHoldings : null,
+    lastRegime: maOverlay ? lastRegime : null,
+    regimeLog: maOverlay ? regimeLog : null,
   };
 }
 
@@ -1331,9 +1514,11 @@ function renderMomHoldings(rows) {
       return `<tr><td>${h.month}</td><td>${(h.codes || []).join(", ")}</td><td>${names}</td></tr>`;
     })
     .join("");
-  return `<div class="card pad" id="momHoldings"><div class="section-title">월간 편입 표 (모멘텀 · 최근 ${slice.length}개월)</div>
+  const dual = state.rebalance === "DMOM";
+  const title = dual ? "듀얼 모멘텀" : "모멘텀";
+  return `<div class="card pad" id="momHoldings"><div class="section-title">월간 편입 표 (${title} · 최근 ${slice.length}개월)</div>
     <table><thead><tr><th>월</th><th>코드</th><th>종목 · 비중</th></tr></thead><tbody>${body}</tbody></table>
-    <div class="warn">편입은 전월 말 기준 ${state.momLookback}개월 수익률 상위 ${state.momTopN} · 교체 시 비용 0.1% · 당월 성과는 순위 산정에 쓰지 않음</div>
+    <div class="warn">편입은 전월 말 기준 ${state.momLookback}개월 수익률 상위 ${state.momTopN}${dual ? " · 절대모멘텀(안전자산 대비) 필터" : ""} · 교체 시 비용 0.1% · 당월 성과는 순위 산정에 쓰지 않음</div>
   </div>`;
 }
 
@@ -1372,7 +1557,14 @@ function renderResult(r, bench, picks, corr, tax) {
     ? `<div class="warn">* 부분 연도: 해당 연도에 1월 또는 12월 거래일이 없어 공개 연간 수익률과 직접 비교하면 안 됩니다.</div>`
     : "";
   const momTable = renderMomHoldings(r.momHoldings);
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  const regimeNote = r.lastRegime
+    ? `<div class="warn">이동평균 트렌드 오버레이 · 최근 국면: <strong>${r.lastRegime === "on" ? "위험온" : "위험오프"}</strong> · MA${state.maWindow} · 안전자산 ${state.cashCode} · 파라미터 민감 · 투자 자문 아님</div>`
+    : "";
+  const weightNote =
+    state.weighting === "invVol"
+      ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
+      : "";
+  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -1470,7 +1662,8 @@ function reviewAgent(r, bench, picks) {
     "· 기본은 가격 수익률입니다. TR 토글 시에도 분배율은 모델값입니다.",
     "· 세금·수수료 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
-    "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다."
+    "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다.",
+    "· 모멘텀·역변동성·이동평균 파라미터는 민감하며 과거≠미래입니다."
   );
   return lines.join("\n");
 }
@@ -1481,11 +1674,24 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#customDates").style.display = e.target.value === "custom" ? "flex" : "none";
   };
   const syncMomControls = () => {
-    const on = state.rebalance === "MOM";
+    const on = state.rebalance === "MOM" || state.rebalance === "DMOM";
     const row = $("#momControls");
     if (row) row.style.display = on ? "flex" : "none";
     const hint = $("#momHint");
-    if (hint) hint.style.display = on ? "block" : "none";
+    if (hint) {
+      hint.style.display = on ? "block" : "none";
+      hint.textContent =
+        state.rebalance === "DMOM"
+          ? "선택한 ETF가 듀얼 모멘텀 유니버스입니다. 상대 모멘텀 상위 N 후 안전자산 대비 절대 필터 · 교체 시 0.1% 비용."
+          : "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.";
+    }
+    const cashRow = $("#dmomCashRow");
+    if (cashRow) cashRow.style.display = state.rebalance === "DMOM" || state.maOverlay ? "flex" : "none";
+  };
+  const syncStratControls = () => {
+    const maRow = $("#maOverlayRow");
+    if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
+    syncMomControls();
   };
   $("#rebalance").onchange = (e) => {
     state.rebalance = e.target.value;
@@ -1501,7 +1707,29 @@ document.addEventListener("DOMContentLoaded", () => {
     tn.onchange = (e) => {
       state.momTopN = Math.max(1, Math.min(20, Number(e.target.value) || 3));
     };
-  syncMomControls();
+  const weightingEl = $("#weighting");
+  if (weightingEl)
+    weightingEl.onchange = (e) => {
+      state.weighting = e.target.value === "invVol" ? "invVol" : "fixed";
+    };
+  const maChk = $("#maOverlay");
+  if (maChk)
+    maChk.onchange = (e) => {
+      state.maOverlay = !!e.target.checked;
+      syncStratControls();
+    };
+  const maWin = $("#maWindow");
+  if (maWin)
+    maWin.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.maWindow = v === 100 ? 100 : 200;
+    };
+  const cashEl = $("#cashCode");
+  if (cashEl)
+    cashEl.onchange = (e) => {
+      state.cashCode = e.target.value || "214980";
+    };
+  syncStratControls();
   $("#etfSearch").oninput = (e) => {
     state.search = e.target.value;
     renderList();

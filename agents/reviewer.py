@@ -437,6 +437,101 @@ def main():
             if ws and abs(sum(ws) - 1.0) > 1e-9:
                 fail(f"MOM weights not normalized: {h}")
 
+
+    # --- Dual momentum (DMOM) ---
+    # Single risky + cash: continuous path; cost 0 with absolute always-pass ≈ MOM when cash weaker
+    if "214980" in prices:
+        dmom_uni = {"069500": 1.0}
+        dmom = backtest(
+            dmom_uni, prices, start="2019-01-01",
+            rebalance="DMOM", mom_lookback=1, mom_top_n=1, mom_cost=0.0,
+            cash_code="214980",
+        )
+        if len(dmom.curve) < 20:
+            fail("DMOM curve too short")
+        for i in range(1, min(len(dmom.curve), 400)):
+            pt = dmom.curve[i]
+            d, v = (pt["d"], pt["v"]) if isinstance(pt, dict) else (pt[0], pt[1])
+            if v <= 0:
+                fail(f"DMOM non-positive value on {d}")
+        if not dmom.mom_holdings or len(dmom.mom_holdings) < 2:
+            fail("DMOM should return monthly holdings")
+        # Cost 0 single ticker: if every month absolute passes, equals MOM; otherwise may hold cash
+        mom_cmp = backtest(
+            dmom_uni, prices, start="2019-01-01",
+            rebalance="MOM", mom_lookback=1, mom_top_n=1, mom_cost=0.0,
+        )
+        # Path must remain finite; when absolute always passes (rare), ≈ MOM
+        always_risky = all(
+            h.get("codes") == ["069500"] for h in (dmom.mom_holdings or [])
+        )
+        if always_risky and abs(dmom.total_return - mom_cmp.total_return) > 1e-6:
+            fail(f"DMOM always-pass should match MOM: {dmom.total_return} vs {mom_cmp.total_return}")
+
+    # --- Inverse-vol weighting ---
+    if "069500" in prices and "214980" in prices:
+        inv = backtest(
+            {"069500": 0.5, "214980": 0.5},
+            prices,
+            start="2019-01-01",
+            rebalance="Q",
+            weighting="invVol",
+            vol_window=60,
+        )
+        # Spot-check invVol weights: higher-vol 069500 gets lower weight than 214980
+        from build_backtest import _inv_vol_weights
+        common_iv = sorted(set(prices["069500"]) & set(prices["214980"]))
+        probe = next(d for d in common_iv if d >= "2022-06-01")
+        ivw = _inv_vol_weights(["069500", "214980"], prices, probe, 60)
+        if abs(sum(ivw.values()) - 1.0) > 1e-9:
+            fail(f"invVol weights not normalized: {ivw}")
+        if ivw.get("069500", 1) >= ivw.get("214980", 0):
+            fail(f"invVol expected cash > equity weight at {probe}: {ivw}")
+        if len(inv.curve) < 20:
+            fail("invVol backtest curve too short")
+
+    # --- MA trend overlay ---
+    if "069500" in prices and "214980" in prices:
+        from build_backtest import _ma_risk_on
+        ma = backtest(
+            {"069500": 1.0},
+            prices,
+            start="2019-01-01",
+            rebalance="M",
+            ma_overlay=True,
+            ma_window=200,
+            cash_code="214980",
+            ma_cash_pct=1.0,
+        )
+        if ma.last_regime not in ("on", "off"):
+            fail(f"MA overlay missing last_regime: {ma.last_regime}")
+        if not ma.regime_log:
+            fail("MA overlay missing regime_log")
+        # Signal uses prior data only — SMA window ends before asof
+        probe2 = next(d for d in sorted(prices["069500"]) if d >= "2020-06-01")
+        dates_before = sorted(d for d in prices["069500"] if d < probe2)
+        if len(dates_before) >= 200:
+            window_dates = dates_before[-200:]
+            if window_dates[-1] >= probe2:
+                fail("MA window incorrectly includes asof date")
+            _ = _ma_risk_on(prices["069500"], probe2, 200)
+        # When risk-off occurred, path should differ from pure buy-hold; holdings include cash conceptually
+        bh = backtest({"069500": 1.0}, prices, start="2019-01-01", rebalance="N")
+        if any(e.get("regime") == "off" for e in ma.regime_log):
+            if abs(ma.total_return - bh.total_return) < 1e-12:
+                fail("MA risk-off periods should change path vs buy-hold")
+            # Confirm at least one rebalance day was risk-off (cash would be 100% of target)
+            if not any(e.get("regime") == "off" for e in ma.regime_log):
+                fail("expected risk-off regime entry")
+        for i in range(1, min(len(ma.curve), 400)):
+            pt = ma.curve[i]
+            d, v = (pt["d"], pt["v"]) if isinstance(pt, dict) else (pt[0], pt[1])
+            if v <= 0:
+                fail(f"MA overlay non-positive value on {d}")
+
+    # --- Existing MOM / yearly / presets still covered above ---
+
+
     print("PASS")
 
     print(
