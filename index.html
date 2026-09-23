@@ -14,12 +14,12 @@
       <div>
         <div class="eyebrow">KR ETF Lab · Agent build</div>
         <h1>한국에서 사는 ETF로 포트 짜고 과거 수익률 보기</h1>
-        <p class="sub">KRX 상장 ETF만 넣었습니다. 비중을 정하면 공통 상장 기간의 가격 수익률, 낙폭, 벤치마크 대비를 계산합니다.</p>
+        <p class="sub">KRX 상장 ETF만 넣었습니다. 검색·카테고리로 고르고, 비중과 월 적립을 정하면 공통 상장 기간의 가격 수익률을 계산합니다.</p>
       </div>
       <div class="stamp" id="stamp"></div>
     </header>
     <div class="layout">
-      <aside class="card pad">
+      <aside class="card pad sidebar">
         <div class="section-title">프리셋</div>
         <div class="presets" id="presets"></div>
         <div class="row">
@@ -40,9 +40,30 @@
           <input type="date" id="startDate" value="2021-01-01" />
           <input type="date" id="endDate" value="2026-09-23" />
         </div>
+
+        <div class="section-title">월 적립 (DCA)</div>
+        <label class="toggle">
+          <input type="checkbox" id="dcaOn" />
+          <span>매월 첫 거래일에 현금 유입 후 목표 비중 매수</span>
+        </label>
+        <div class="row dca-row" id="dcaInputs" style="display:none">
+          <label class="field">시작 원금(원)
+            <input type="number" id="initialCapital" min="1" step="100000" value="10000000" />
+          </label>
+          <label class="field">매월 적립(원)
+            <input type="number" id="monthlyAmount" min="0" step="100000" value="500000" />
+          </label>
+        </div>
+
+        <div class="section-title">ETF 검색 · 필터</div>
+        <div class="row">
+          <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
+        </div>
+        <div class="cats" id="catFilters"></div>
+
         <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
         <div class="etf-list" id="etfList"></div>
-        <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화</span></div>
+        <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화 · 시세는 선택 종목만 로드</span></div>
         <button class="primary" id="run">백테스트 실행</button>
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
@@ -50,6 +71,7 @@
     <p class="foot">
       투자 자문이 아닙니다. 과거 수익률은 미래 수익을 보장하지 않습니다.
       시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
+      월 적립 수익률은 납입 원금 합 대비입니다.
     </p>
   </div>
   <script src="./app.js"></script>
