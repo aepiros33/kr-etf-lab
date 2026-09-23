@@ -40,6 +40,8 @@ class Stats:
     mom_holdings: list | None = None
     last_regime: str | None = None
     regime_log: list | None = None
+    hedge_active: bool | None = None
+    hedge_log: list | None = None
 
 
 def load(codes: list[str] | None = None):
@@ -308,7 +310,69 @@ def _apply_ma_overlay(
     return {c: w / s for c, w in out.items()}
 
 
+# --- 국면 헤지(실험): see docs/EXPERIMENT_REGIME_HEDGE.md ---
+# Dual-MA signal (069500 ∧ 360750 below SMA) → optional −1x 114800 or cash sleeve ≤15%.
+# NOT a default strategy. 2X inverse forbidden. No look-ahead (SMA uses dates < asof).
 BENCH_CODE = "069500"
+REGIME_HEDGE_SIGNAL_A = "069500"
+REGIME_HEDGE_SIGNAL_B = "360750"
+REGIME_HEDGE_INV_CODE = "114800"  # −1x only
+REGIME_HEDGE_FORBIDDEN_2X = frozenset({"252670"})  # KODEX 200선물인버스2X 등
+REGIME_HEDGE_MAX_PCT = 0.15
+
+
+def _regime_hedge_signal(
+    prices: dict,
+    asof: str,
+    window: int = 200,
+    code_a: str = REGIME_HEDGE_SIGNAL_A,
+    code_b: str = REGIME_HEDGE_SIGNAL_B,
+) -> bool:
+    """True when BOTH signal ETFs are below their SMA (MA↓ ∧ MA↓). No look-ahead."""
+    if code_a not in prices or code_b not in prices:
+        return False
+    a_on = _ma_risk_on(prices[code_a], asof, window)  # True = price >= SMA
+    b_on = _ma_risk_on(prices[code_b], asof, window)
+    return (not a_on) and (not b_on)
+
+
+def _apply_regime_hedge(
+    tw: dict[str, float],
+    hedge_on: bool,
+    hedge_code: str,
+    hedge_pct: float,
+) -> dict[str, float]:
+    """Scale risk sleeve; allocate capped hedge weight when hedge_on."""
+    if not hedge_on:
+        return dict(tw)
+    pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(hedge_pct)))
+    if pct <= 0:
+        return dict(tw)
+    scale = 1.0 - pct
+    out: dict[str, float] = {}
+    for c, w in tw.items():
+        if c == hedge_code:
+            continue
+        nw = w * scale
+        if nw > 0:
+            out[c] = nw
+    out[hedge_code] = out.get(hedge_code, 0.0) + pct
+    s = sum(out.values())
+    if s <= 0:
+        return {hedge_code: 1.0}
+    return {c: w / s for c, w in out.items()}
+
+
+def _resolve_regime_hedge_code(mode: str, cash_code: str, hedge_code: str | None) -> str:
+    mode = (mode or "inverse").lower()
+    if mode == "cash":
+        return cash_code or "214980"
+    code = hedge_code or REGIME_HEDGE_INV_CODE
+    if code in REGIME_HEDGE_FORBIDDEN_2X:
+        raise ValueError(f"2X 인버스 {code} 는 국면 헤지(실험)에서 금지입니다 (−1x {REGIME_HEDGE_INV_CODE}만 허용)")
+    if code != REGIME_HEDGE_INV_CODE:
+        raise ValueError(f"인버스 헤지는 {REGIME_HEDGE_INV_CODE} (−1x)만 허용 (요청={code})")
+    return code
 
 
 def backtest(
@@ -328,6 +392,10 @@ def backtest(
     ma_window: int = 200,
     cash_code: str = "214980",
     ma_cash_pct: float = 1.0,
+    regime_hedge: bool = False,
+    regime_hedge_mode: str = "inverse",
+    regime_hedge_pct: float = 0.15,
+    regime_hedge_code: str | None = None,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -344,12 +412,27 @@ def backtest(
     if ma_overlay and BENCH_CODE not in prices:
         raise ValueError(f"벤치마크 {BENCH_CODE} 시세가 없습니다")
 
+    hedge_code_res = None
+    if regime_hedge:
+        hedge_code_res = _resolve_regime_hedge_code(
+            regime_hedge_mode, cash_code, regime_hedge_code
+        )
+        for sig in (REGIME_HEDGE_SIGNAL_A, REGIME_HEDGE_SIGNAL_B):
+            if sig not in prices:
+                raise ValueError(f"국면 헤지 신호용 {sig} 시세가 없습니다")
+        if hedge_code_res not in prices:
+            raise ValueError(f"국면 헤지 자산 {hedge_code_res} 시세가 없습니다")
+
     total_w = sum(weights[c] for c in codes)
     tw = {c: weights[c] / total_w for c in codes}
 
     calendar_codes = list(codes)
     if need_cash and cash_code not in calendar_codes:
         calendar_codes.append(cash_code)
+    if regime_hedge:
+        for extra in (REGIME_HEDGE_SIGNAL_A, REGIME_HEDGE_SIGNAL_B, hedge_code_res):
+            if extra and extra not in calendar_codes:
+                calendar_codes.append(extra)
 
     calendars = []
     for c in calendar_codes:
@@ -392,9 +475,11 @@ def backtest(
     current_tw = dict(tw)
     last_regime: str | None = None
     regime_log: list[dict] = []
+    last_hedge: bool | None = None
+    hedge_log: list[dict] = []
 
     def _target_weights(d: str) -> tuple[dict[str, float], list[str]]:
-        nonlocal last_regime
+        nonlocal last_regime, last_hedge
         if rebalance == "MOM":
             _picked, base = _momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache
@@ -417,6 +502,13 @@ def backtest(
             base = _apply_ma_overlay(base, risk_on, cash_code, ma_cash_pct)
         elif last_regime is None:
             last_regime = None
+
+        if regime_hedge and hedge_code_res:
+            hedge_on = _regime_hedge_signal(prices, d, ma_win)
+            last_hedge = hedge_on
+            hedge_log.append({"date": d, "hedge": hedge_on})
+            pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(regime_hedge_pct)))
+            base = _apply_regime_hedge(base, hedge_on, hedge_code_res, pct)
 
         active = [c for c, w in base.items() if w > 0]
         return base, active
@@ -442,6 +534,9 @@ def backtest(
 
             # 2) Monthly DCA cash inflow on first trading day of new month
             do_rebal = _is_rebal(prev, d, rebalance)
+            # 국면 헤지(실험): 헤지 슬리브는 월 1회만 갱신
+            if regime_hedge and _is_new_month(prev, d):
+                do_rebal = True
             if monthly_contribution > 0 and _is_new_month(prev, d):
                 value += monthly_contribution
                 total_invested += monthly_contribution
@@ -545,6 +640,8 @@ def backtest(
         mom_holdings=mom_holdings if mom_like else None,
         last_regime=last_regime if ma_overlay else None,
         regime_log=regime_log if ma_overlay else None,
+        hedge_active=last_hedge if regime_hedge else None,
+        hedge_log=hedge_log if regime_hedge else None,
     )
 
 

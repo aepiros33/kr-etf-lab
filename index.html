@@ -84,6 +84,26 @@
           </label>
         </div>
         <p class="muted-note">MA 길이는 민감합니다. 과거 국면 표시용이며 투자 권유가 아닙니다.</p>
+        <label class="toggle">
+          <input type="checkbox" id="regimeHedge" />
+          <span>국면 헤지(실험)</span>
+        </label>
+        <div class="row mom-row" id="regimeHedgeRow" style="display:none">
+          <label class="field">헤지 모드
+            <select id="regimeHedgeMode">
+              <option value="inverse" selected>−1x 인버스(114800)</option>
+              <option value="cash">현금/단기채(안전자산)</option>
+            </select>
+          </label>
+          <label class="field">헤지 비중 상한(%)
+            <select id="regimeHedgePct">
+              <option value="5">5</option>
+              <option value="10">10</option>
+              <option value="15" selected>15</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">실험: 069500·360750 둘 다 MA↓일 때만 헤지 슬리브(≤15%, 월1회). 2X 인버스 금지. 기본 프리셋 미포함. 투자 자문 아님.</p>
         <div class="row" id="customDates" style="display:none">
           <input type="date" id="startDate" value="2021-01-01" />
           <input type="date" id="endDate" value="2026-09-23" />
@@ -156,6 +176,6 @@
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
     </p>
   </div>
-  <script src="./app.js?v=strat3"></script>
+  <script src="./app.js?v=regimeHedge1"></script>
 </body>
 </html>

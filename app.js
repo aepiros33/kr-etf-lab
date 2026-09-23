@@ -126,6 +126,10 @@ const state = {
   maWindow: 200,
   cashCode: "214980",
   maCashPct: 1.0,
+  regimeHedge: false,
+  regimeHedgeMode: "inverse", // inverse (−1x 114800) | cash (214980/423160)
+  regimeHedgePct: 0.15, // hard cap ≤15%
+  regimeHedgeCode: "114800",
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -656,9 +660,15 @@ async function run() {
   const picks = Object.entries(state.selected).filter(([, w]) => w > 0);
   if (!picks.length) return;
   const codes = picks.map(([c]) => c);
-  const needCash = state.rebalance === "DMOM" || state.maOverlay;
+  const needCash = state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash");
+  const needHedge = !!state.regimeHedge;
   const extra = [BENCH];
   if (needCash) extra.push(state.cashCode || "214980");
+  if (needHedge) {
+    extra.push("360750");
+    if (state.regimeHedgeMode === "inverse") extra.push(state.regimeHedgeCode || "114800");
+    else extra.push(state.cashCode || "214980");
+  }
   await ensurePrices([...codes, ...extra]);
   for (const c of codes) {
     if (!state.prices[c]) {
@@ -670,10 +680,48 @@ async function run() {
     $("#result").innerHTML = `<div class="card pad empty">안전자산 ${state.cashCode} 시세가 없습니다.</div>`;
     return;
   }
+  if (needHedge) {
+    if (!state.prices["360750"]) {
+      $("#result").innerHTML = `<div class="card pad empty">국면 헤지 신호용 360750 시세가 없습니다.</div>`;
+      return;
+    }
+    const hCode =
+      state.regimeHedgeMode === "cash"
+        ? state.cashCode || "214980"
+        : state.regimeHedgeCode || "114800";
+    if (hCode === "252670") {
+      $("#result").innerHTML = `<div class="card pad empty">2X 인버스는 국면 헤지(실험)에서 금지입니다 (−1x 114800만 허용).</div>`;
+      return;
+    }
+    if (state.regimeHedgeMode === "inverse" && hCode !== "114800") {
+      $("#result").innerHTML = `<div class="card pad empty">인버스 헤지는 114800 (−1x)만 허용합니다.</div>`;
+      return;
+    }
+    if (!state.prices[hCode]) {
+      $("#result").innerHTML = `<div class="card pad empty">국면 헤지 자산 ${hCode} 시세가 없습니다.</div>`;
+      return;
+    }
+  }
   const [start, end] = periodBounds();
   const initial = state.dcaOn ? state.initialCapital : 1;
   const monthly = state.dcaOn ? state.monthlyAmount : 0;
-  const loadCodes = [...new Set([...codes, BENCH, ...(needCash ? [state.cashCode || "214980"] : [])])];
+  const hedgeLoad =
+    needHedge
+      ? [
+          "360750",
+          state.regimeHedgeMode === "cash"
+            ? state.cashCode || "214980"
+            : state.regimeHedgeCode || "114800",
+        ]
+      : [];
+  const loadCodes = [
+    ...new Set([
+      ...codes,
+      BENCH,
+      ...(needCash ? [state.cashCode || "214980"] : []),
+      ...hedgeLoad,
+    ]),
+  ];
   const priceMap = state.totalReturn
     ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
@@ -699,6 +747,10 @@ async function run() {
       maWindow: state.maWindow,
       cashCode: state.cashCode || "214980",
       maCashPct: state.maCashPct,
+      regimeHedge: state.regimeHedge,
+      regimeHedgeMode: state.regimeHedgeMode,
+      regimeHedgePct: Math.min(0.15, Math.max(0, Number(state.regimeHedgePct) || 0.15)),
+      regimeHedgeCode: state.regimeHedgeCode || "114800",
     }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
@@ -896,6 +948,49 @@ function applyMaOverlay(tw, riskOn, cashCode, maCashPct) {
   return Object.fromEntries(Object.entries(out).map(([c, w]) => [c, w / s]));
 }
 
+/** 국면 헤지(실험): docs/EXPERIMENT_REGIME_HEDGE.md — sync with build_backtest.py */
+const REGIME_HEDGE_MAX_PCT = 0.15;
+const REGIME_HEDGE_INV = "114800";
+const REGIME_HEDGE_FORBIDDEN_2X = new Set(["252670"]);
+const REGIME_HEDGE_A = "069500";
+const REGIME_HEDGE_B = "360750";
+
+function regimeHedgeSignal(priceMap, asof, window = 200) {
+  if (!priceMap[REGIME_HEDGE_A] || !priceMap[REGIME_HEDGE_B]) return false;
+  const aOn = maRiskOn(priceMap[REGIME_HEDGE_A], asof, window);
+  const bOn = maRiskOn(priceMap[REGIME_HEDGE_B], asof, window);
+  return !aOn && !bOn;
+}
+
+function applyRegimeHedge(tw, hedgeOn, hedgeCode, hedgePct) {
+  if (!hedgeOn) return { ...tw };
+  const pct = Math.min(REGIME_HEDGE_MAX_PCT, Math.max(0, Number(hedgePct)));
+  if (!(pct > 0)) return { ...tw };
+  const scale = 1 - pct;
+  const out = {};
+  for (const [c, w] of Object.entries(tw)) {
+    if (c === hedgeCode) continue;
+    const nw = w * scale;
+    if (nw > 0) out[c] = nw;
+  }
+  out[hedgeCode] = (out[hedgeCode] || 0) + pct;
+  const s = Object.values(out).reduce((a, b) => a + b, 0);
+  if (!(s > 0)) return { [hedgeCode]: 1 };
+  return Object.fromEntries(Object.entries(out).map(([c, w]) => [c, w / s]));
+}
+
+function resolveRegimeHedgeCode(mode, cashCode, hedgeCode) {
+  if ((mode || "inverse") === "cash") return cashCode || "214980";
+  const code = hedgeCode || REGIME_HEDGE_INV;
+  if (REGIME_HEDGE_FORBIDDEN_2X.has(code)) {
+    throw new Error(`2X 인버스 ${code} 금지 (−1x ${REGIME_HEDGE_INV}만)`);
+  }
+  if (code !== REGIME_HEDGE_INV) {
+    throw new Error(`인버스 헤지는 ${REGIME_HEDGE_INV}만 허용`);
+  }
+  return code;
+}
+
 /**
  * Same-day: mark-to-market THEN rebalance.
  * DCA: on first trading day of each new month, add cash then buy to target weights.
@@ -927,8 +1022,22 @@ function backtest(
   const maWindow = Math.max(2, Number(opts.maWindow) || 200);
   const cashCode = opts.cashCode || "214980";
   const maCashPct = opts.maCashPct != null ? Number(opts.maCashPct) : 1.0;
+  const regimeHedge = !!opts.regimeHedge;
+  const regimeHedgeMode = opts.regimeHedgeMode === "cash" ? "cash" : "inverse";
+  const regimeHedgePct = Math.min(
+    REGIME_HEDGE_MAX_PCT,
+    Math.max(0, opts.regimeHedgePct != null ? Number(opts.regimeHedgePct) : REGIME_HEDGE_MAX_PCT)
+  );
+  let hedgeCodeRes = null;
+  if (regimeHedge) {
+    try {
+      hedgeCodeRes = resolveRegimeHedgeCode(regimeHedgeMode, cashCode, opts.regimeHedgeCode);
+    } catch (e) {
+      return { error: e.message || String(e) };
+    }
+  }
   const momLike = rebalance === "MOM" || rebalance === "DMOM";
-  const needCash = rebalance === "DMOM" || maOverlay;
+  const needCash = rebalance === "DMOM" || maOverlay || (regimeHedge && regimeHedgeMode === "cash");
 
   if (needCash && !priceMap[cashCode]) {
     return { error: `안전자산 ${cashCode} 시세가 없습니다.` };
@@ -936,9 +1045,22 @@ function backtest(
   if (maOverlay && !priceMap[BENCH]) {
     return { error: `벤치마크 ${BENCH} 시세가 없습니다.` };
   }
+  if (regimeHedge) {
+    if (!priceMap[REGIME_HEDGE_A] || !priceMap[REGIME_HEDGE_B]) {
+      return { error: "국면 헤지 신호용 069500·360750 시세가 필요합니다." };
+    }
+    if (!priceMap[hedgeCodeRes]) {
+      return { error: `국면 헤지 자산 ${hedgeCodeRes} 시세가 없습니다.` };
+    }
+  }
 
   const calendarCodes = [...codes];
   if (needCash && !calendarCodes.includes(cashCode)) calendarCodes.push(cashCode);
+  if (regimeHedge) {
+    for (const extra of [REGIME_HEDGE_A, REGIME_HEDGE_B, hedgeCodeRes]) {
+      if (extra && !calendarCodes.includes(extra)) calendarCodes.push(extra);
+    }
+  }
 
   const sets = calendarCodes.map(
     (c) => new Set(Object.keys(priceMap[c] || {}).filter((d) => d >= start && d <= end))
@@ -982,6 +1104,8 @@ function backtest(
   const momHoldings = [];
   const regimeLog = [];
   let lastRegime = null;
+  const hedgeLog = [];
+  let lastHedge = null;
   const curve = [],
     rets = [];
 
@@ -1011,6 +1135,12 @@ function backtest(
       regimeLog.push({ date: d, regime: lastRegime });
       base = applyMaOverlay(base, riskOn, cashCode, maCashPct);
     }
+    if (regimeHedge && hedgeCodeRes) {
+      const hedgeOn = regimeHedgeSignal(priceMap, d, maWindow);
+      lastHedge = hedgeOn;
+      hedgeLog.push({ date: d, hedge: hedgeOn });
+      base = applyRegimeHedge(base, hedgeOn, hedgeCodeRes, regimeHedgePct);
+    }
     const active = Object.keys(base).filter((c) => base[c] > 0);
     return [base, active];
   }
@@ -1031,6 +1161,7 @@ function backtest(
 
       // 2) DCA cash then 3) rebalance
       let doRebal = isRebal(prev, d);
+      if (regimeHedge && isNewMonth(prev, d)) doRebal = true;
       if (monthlyContribution > 0 && isNewMonth(prev, d)) {
         value += monthlyContribution;
         totalInvested += monthlyContribution;
@@ -1130,6 +1261,8 @@ function backtest(
     momHoldings: momLike ? momHoldings : null,
     lastRegime: maOverlay ? lastRegime : null,
     regimeLog: maOverlay ? regimeLog : null,
+    hedgeActive: regimeHedge ? lastHedge : null,
+    hedgeLog: regimeHedge ? hedgeLog : null,
   };
 }
 
@@ -1560,11 +1693,15 @@ function renderResult(r, bench, picks, corr, tax) {
   const regimeNote = r.lastRegime
     ? `<div class="warn">이동평균 트렌드 오버레이 · 최근 국면: <strong>${r.lastRegime === "on" ? "위험온" : "위험오프"}</strong> · MA${state.maWindow} · 안전자산 ${state.cashCode} · 파라미터 민감 · 투자 자문 아님</div>`
     : "";
+  const hedgeNote =
+    r.hedgeLog
+      ? `<div class="warn">국면 헤지(실험) · 최근: <strong>${r.hedgeActive ? "헤지 소비중" : "헤지 없음"}</strong> · 신호 069500∧360750 MA↓ · 모드 ${state.regimeHedgeMode === "cash" ? "현금/단기채" : "−1x 114800"} · 상한 ${(Math.min(0.15, state.regimeHedgePct) * 100).toFixed(0)}% · 월1회 · 2X 금지 · 실험·자문 아님</div>`
+      : "";
   const weightNote =
     state.weighting === "invVol"
       ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
       : "";
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -1686,11 +1823,17 @@ document.addEventListener("DOMContentLoaded", () => {
           : "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.";
     }
     const cashRow = $("#dmomCashRow");
-    if (cashRow) cashRow.style.display = state.rebalance === "DMOM" || state.maOverlay ? "flex" : "none";
+    if (cashRow)
+      cashRow.style.display =
+        state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")
+          ? "flex"
+          : "none";
   };
   const syncStratControls = () => {
     const maRow = $("#maOverlayRow");
     if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
+    const rhRow = $("#regimeHedgeRow");
+    if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
     syncMomControls();
   };
   $("#rebalance").onchange = (e) => {
@@ -1717,6 +1860,24 @@ document.addEventListener("DOMContentLoaded", () => {
     maChk.onchange = (e) => {
       state.maOverlay = !!e.target.checked;
       syncStratControls();
+    };
+  const rhChk = $("#regimeHedge");
+  if (rhChk)
+    rhChk.onchange = (e) => {
+      state.regimeHedge = !!e.target.checked;
+      syncStratControls();
+    };
+  const rhMode = $("#regimeHedgeMode");
+  if (rhMode)
+    rhMode.onchange = (e) => {
+      state.regimeHedgeMode = e.target.value === "cash" ? "cash" : "inverse";
+      syncStratControls();
+    };
+  const rhPct = $("#regimeHedgePct");
+  if (rhPct)
+    rhPct.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.regimeHedgePct = Math.min(0.15, Math.max(0, Number.isFinite(v) ? v / 100 : 0.15));
     };
   const maWin = $("#maWindow");
   if (maWin)
