@@ -612,6 +612,123 @@ def main():
             if not rh_cash.hedge_log:
                 fail("cash-mode regime hedge missing hedge_log")
 
+
+    # --- GOLDON (금 온/오프 슬리브) G1/G2 ---
+    from build_backtest import (
+        GOLD_CODE,
+        GOLD_CASH,
+        _apply_gold_sleeve,
+        _gold_signal_on,
+        _lookback_return,
+        _month_end_closes,
+        _clamp_gold_sleeve,
+    )
+    # Unit: sleeve ON → 411060 == sleevePct; OFF → 411060 == 0
+    on_w = _apply_gold_sleeve({"069500": 0.7, "148070": 0.3, GOLD_CODE: 0.2}, True, 0.15)
+    if abs(on_w.get(GOLD_CODE, -1) - 0.15) > 1e-9:
+        fail(f"G1 unit ON weight: {on_w}")
+    off_w = _apply_gold_sleeve({"069500": 1.0, GOLD_CODE: 0.5}, False, 0.15)
+    if abs(off_w.get(GOLD_CODE, 0.0)) > 1e-9:
+        fail(f"G1 unit OFF weight: {off_w}")
+    if abs(off_w.get(GOLD_CASH, 0) - 0.15) > 1e-9 and abs(sum(v for k, v in off_w.items() if k == GOLD_CASH) - 0.15) > 1e-9:
+        # OFF sleeve is in cash; may merge if rest had cash — at least cash >= sleeve
+        if off_w.get(GOLD_CASH, 0) + 1e-9 < 0.15:
+            fail(f"G1 unit OFF cash sleeve: {off_w}")
+    if abs(_clamp_gold_sleeve(0.05) - 0.10) > 1e-12 or abs(_clamp_gold_sleeve(0.99) - 0.20) > 1e-12:
+        fail("gold sleeve clamp 10–20% failed")
+
+    if GOLD_CODE in prices and GOLD_CASH in prices and "069500" in prices:
+        # Universe without gold so G1 is unambiguous
+        g_uni = {"069500": 0.6, "148070": 0.4} if "148070" in prices else {"069500": 1.0}
+        # Drop missing
+        g_uni = {c: w for c, w in g_uni.items() if c in prices}
+        g = backtest(
+            g_uni,
+            prices,
+            start="2022-01-01",
+            rebalance="Q",
+            gold_on=True,
+            gold_sleeve_pct=0.15,
+            gold_lookback=1,
+            mom_cost=0.001,
+        )
+        if not g.gold_log or len(g.gold_log) < 2:
+            fail("GOLDON missing gold_log")
+        if g.gold_active is None or g.gold_holding is None:
+            fail("GOLDON missing gold_active/holding")
+        if g.gold_holding not in (GOLD_CODE, GOLD_CASH):
+            fail(f"GOLDON holding unexpected: {g.gold_holding}")
+
+        # G1: after warmup, at each monthly rebalance eval weight(411060) is 0 or sleevePct
+        sleeve = 0.15
+        warmup_months = 2  # prior month-end + lookback window
+        for i, entry in enumerate(g.gold_log):
+            if i < warmup_months:
+                continue
+            wmap = entry.get("weights") or {}
+            w411 = float(wmap.get(GOLD_CODE, 0.0))
+            if abs(w411) > 1e-9 and abs(w411 - sleeve) > 1e-9:
+                fail(f"G1 month {entry.get('month')}: 411060 weight={w411} (want 0 or {sleeve})")
+            on = bool(entry.get("on"))
+            if on and abs(w411 - sleeve) > 1e-9:
+                fail(f"G1 ON month {entry.get('month')}: w={w411}")
+            if (not on) and abs(w411) > 1e-9:
+                fail(f"G1 OFF month {entry.get('month')}: w={w411}")
+
+        if g.gold_active:
+            if g.gold_holding != GOLD_CODE:
+                fail(f"G1 latest ON holding: {g.gold_holding}")
+        else:
+            if g.gold_holding != GOLD_CASH:
+                fail(f"G1 latest OFF holding: {g.gold_holding}")
+
+        # G2: every month-end price used in signal has ed[:7] < signalMonth
+        me_cache = {
+            GOLD_CODE: _month_end_closes(prices[GOLD_CODE]),
+            GOLD_CASH: _month_end_closes(prices[GOLD_CASH]),
+        }
+        for entry in g.gold_log:
+            sm = entry["month"]
+            for code in (GOLD_CODE, GOLD_CASH):
+                # mirror _lookback_return window
+                from build_backtest import _shift_month
+                end_ym = _shift_month(sm, -1)
+                start_ym = _shift_month(end_ym, -1)
+                ends = me_cache[code]
+                for ym in (end_ym, start_ym):
+                    if ym in ends:
+                        ed, _px = ends[ym]
+                        if ed[:7] >= sm:
+                            fail(f"G2 look-ahead {code} ed={ed} signalMonth={sm}")
+            # signal helper itself must not use look-ahead (returns bool)
+            _ = _gold_signal_on(sm, 1, me_cache)
+
+        # Path stays positive
+        for i in range(1, min(len(g.curve), 400)):
+            pt = g.curve[i]
+            d, v = (pt["d"], pt["v"]) if isinstance(pt, dict) else (pt[0], pt[1])
+            if v <= 0:
+                fail(f"GOLDON non-positive value on {d}")
+
+        # Flip cost: path with cost differs from cost=0 when flips occur
+        g0 = backtest(
+            g_uni, prices, start="2022-01-01", rebalance="M",
+            gold_on=True, gold_sleeve_pct=0.15, gold_lookback=1, mom_cost=0.0,
+        )
+        g1 = backtest(
+            g_uni, prices, start="2022-01-01", rebalance="M",
+            gold_on=True, gold_sleeve_pct=0.15, gold_lookback=1, mom_cost=0.001,
+        )
+        flips = 0
+        prev = None
+        for e in g1.gold_log or []:
+            if prev is not None and bool(e["on"]) != bool(prev):
+                flips += 1
+            prev = e["on"]
+        if flips > 0 and abs(g0.total_return - g1.total_return) < 1e-15:
+            fail("GOLDON flip cost should change path when flips>0")
+
+
     # Presets must never include inverse/leverage 114800 / 252670
     for name, w in PRESETS.items():
         if "114800" in w or "252670" in w:

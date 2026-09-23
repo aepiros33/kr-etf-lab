@@ -130,6 +130,9 @@ const state = {
   regimeHedgeMode: "inverse", // inverse (−1x 114800) | cash (214980/423160)
   regimeHedgePct: 0.15, // hard cap ≤15%
   regimeHedgeCode: "114800",
+  goldOn: false,
+  goldSleevePct: 0.15, // UI 10–20%
+  goldLookback: 1, // 1|3
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -662,12 +665,16 @@ async function run() {
   const codes = picks.map(([c]) => c);
   const needCash = state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash");
   const needHedge = !!state.regimeHedge;
+  const needGold = !!state.goldOn;
   const extra = [BENCH];
   if (needCash) extra.push(state.cashCode || "214980");
   if (needHedge) {
     extra.push("360750");
     if (state.regimeHedgeMode === "inverse") extra.push(state.regimeHedgeCode || "114800");
     else extra.push(state.cashCode || "214980");
+  }
+  if (needGold) {
+    extra.push(GOLD_CODE, GOLD_CASH);
   }
   await ensurePrices([...codes, ...extra]);
   for (const c of codes) {
@@ -702,6 +709,16 @@ async function run() {
       return;
     }
   }
+  if (needGold) {
+    if (!state.prices[GOLD_CODE]) {
+      $("#result").innerHTML = `<div class="card pad empty">금 슬리브 신호용 ${GOLD_CODE} 시세가 없습니다.</div>`;
+      return;
+    }
+    if (!state.prices[GOLD_CASH]) {
+      $("#result").innerHTML = `<div class="card pad empty">금 슬리브 현금대리 ${GOLD_CASH} 시세가 없습니다.</div>`;
+      return;
+    }
+  }
   const [start, end] = periodBounds();
   const initial = state.dcaOn ? state.initialCapital : 1;
   const monthly = state.dcaOn ? state.monthlyAmount : 0;
@@ -720,6 +737,7 @@ async function run() {
       BENCH,
       ...(needCash ? [state.cashCode || "214980"] : []),
       ...hedgeLoad,
+      ...(needGold ? [GOLD_CODE, GOLD_CASH] : []),
     ]),
   ];
   const priceMap = state.totalReturn
@@ -751,6 +769,9 @@ async function run() {
       regimeHedgeMode: state.regimeHedgeMode,
       regimeHedgePct: Math.min(0.15, Math.max(0, Number(state.regimeHedgePct) || 0.15)),
       regimeHedgeCode: state.regimeHedgeCode || "114800",
+      goldOn: state.goldOn,
+      goldSleevePct: clampGoldSleeve(state.goldSleevePct),
+      goldLookback: state.goldLookback,
     }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
@@ -991,6 +1012,48 @@ function resolveRegimeHedgeCode(mode, cashCode, hedgeCode) {
   return code;
 }
 
+
+// --- GOLDON (금 온/오프 슬리브): sync with agents/build_backtest.py ---
+// Overlay order: base → invVol → maOverlay → regime → gold last (G1).
+const GOLD_CODE = "411060";
+const GOLD_CASH = "214980"; // fixed; NEVER 0072R0
+const GOLD_COST = 0.001;
+const GOLD_SLEEVE_DEFAULT = 0.15;
+
+function clampGoldSleeve(pct) {
+  const v = pct != null ? Number(pct) : GOLD_SLEEVE_DEFAULT;
+  return Math.min(0.2, Math.max(0.1, Number.isFinite(v) ? v : GOLD_SLEEVE_DEFAULT));
+}
+
+function goldSignalOn(signalMonth, lookback, monthEndsCache) {
+  const goldRet = lookbackReturn(GOLD_CODE, signalMonth, lookback, monthEndsCache);
+  const cashRet = lookbackReturn(GOLD_CASH, signalMonth, lookback, monthEndsCache);
+  if (goldRet == null || cashRet == null) return false;
+  return goldRet > cashRet;
+}
+
+function applyGoldSleeve(tw, goldOn, sleevePct) {
+  const sleeve = clampGoldSleeve(sleevePct);
+  const restScale = 1 - sleeve;
+  const rest = {};
+  for (const [c, w] of Object.entries(tw)) {
+    if (c === GOLD_CODE) continue;
+    if (w > 0) rest[c] = (rest[c] || 0) + w;
+  }
+  const s = Object.values(rest).reduce((a, b) => a + b, 0);
+  const out = {};
+  if (s > 0) {
+    for (const [c, w] of Object.entries(rest)) out[c] = (w / s) * restScale;
+  } else {
+    out[GOLD_CASH] = restScale;
+  }
+  const hold = goldOn ? GOLD_CODE : GOLD_CASH;
+  out[hold] = (out[hold] || 0) + sleeve;
+  const tot = Object.values(out).reduce((a, b) => a + b, 0);
+  if (!(tot > 0)) return { [GOLD_CASH]: 1 };
+  return Object.fromEntries(Object.entries(out).filter(([, w]) => w > 0).map(([c, w]) => [c, w / tot]));
+}
+
 /**
  * Same-day: mark-to-market THEN rebalance.
  * DCA: on first trading day of each new month, add cash then buy to target weights.
@@ -1028,6 +1091,9 @@ function backtest(
     REGIME_HEDGE_MAX_PCT,
     Math.max(0, opts.regimeHedgePct != null ? Number(opts.regimeHedgePct) : REGIME_HEDGE_MAX_PCT)
   );
+  const goldOn = !!opts.goldOn;
+  const goldSleeve = clampGoldSleeve(opts.goldSleevePct != null ? opts.goldSleevePct : GOLD_SLEEVE_DEFAULT);
+  const goldLb = Number(opts.goldLookback) >= 3 ? 3 : 1;
   let hedgeCodeRes = null;
   if (regimeHedge) {
     try {
@@ -1041,6 +1107,10 @@ function backtest(
 
   if (needCash && !priceMap[cashCode]) {
     return { error: `안전자산 ${cashCode} 시세가 없습니다.` };
+  }
+  if (goldOn) {
+    if (!priceMap[GOLD_CODE]) return { error: `금 슬리브 신호용 ${GOLD_CODE} 시세가 없습니다.` };
+    if (!priceMap[GOLD_CASH]) return { error: `금 슬리브 현금대리 ${GOLD_CASH} 시세가 없습니다.` };
   }
   if (maOverlay && !priceMap[BENCH]) {
     return { error: `벤치마크 ${BENCH} 시세가 없습니다.` };
@@ -1061,6 +1131,11 @@ function backtest(
       if (extra && !calendarCodes.includes(extra)) calendarCodes.push(extra);
     }
   }
+  if (goldOn) {
+    for (const extra of [GOLD_CODE, GOLD_CASH]) {
+      if (!calendarCodes.includes(extra)) calendarCodes.push(extra);
+    }
+  }
 
   const sets = calendarCodes.map(
     (c) => new Set(Object.keys(priceMap[c] || {}).filter((d) => d >= start && d <= end))
@@ -1073,9 +1148,15 @@ function backtest(
 
   const monthEndsCodes = [...codes];
   if (rebalance === "DMOM" && !monthEndsCodes.includes(cashCode)) monthEndsCodes.push(cashCode);
-  const monthEndsCache = momLike
-    ? Object.fromEntries(monthEndsCodes.map((c) => [c, monthEndCloses(priceMap[c])]))
-    : {};
+  if (goldOn) {
+    for (const extra of [GOLD_CODE, GOLD_CASH]) {
+      if (!monthEndsCodes.includes(extra)) monthEndsCodes.push(extra);
+    }
+  }
+  const monthEndsCache =
+    momLike || goldOn
+      ? Object.fromEntries(monthEndsCodes.map((c) => [c, monthEndCloses(priceMap[c])]))
+      : {};
 
   const q = (m) => Math.floor((Number(m) - 1) / 3);
   const isRebal = (prev, cur) => {
@@ -1106,6 +1187,10 @@ function backtest(
   let lastRegime = null;
   const hedgeLog = [];
   let lastHedge = null;
+  const goldLog = [];
+  let lastGoldOn = null;
+  let lastGoldHolding = null;
+  let prevGoldState = null;
   const curve = [],
     rets = [];
 
@@ -1141,15 +1226,32 @@ function backtest(
       hedgeLog.push({ date: d, hedge: hedgeOn });
       base = applyRegimeHedge(base, hedgeOn, hedgeCodeRes, regimeHedgePct);
     }
+    // GOLDON last so 411060 weight stays exactly 0 or sleevePct (G1)
+    let goldState = null;
+    if (goldOn) {
+      goldState = goldSignalOn(d.slice(0, 7), goldLb, monthEndsCache);
+      base = applyGoldSleeve(base, goldState, goldSleeve);
+      lastGoldOn = goldState;
+      lastGoldHolding = goldState ? GOLD_CODE : GOLD_CASH;
+      goldLog.push({
+        date: d,
+        month: d.slice(0, 7),
+        on: goldState,
+        holding: lastGoldHolding,
+        weights: { ...base },
+      });
+    }
     const active = Object.keys(base).filter((c) => base[c] > 0);
-    return [base, active];
+    return [base, active, goldState];
   }
 
   for (const d of common) {
     if (!units) {
-      [currentTw, activeCodes] = targetWeights(d);
+      let gState;
+      [currentTw, activeCodes, gState] = targetWeights(d);
       units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
       prevHoldings = new Set(activeCodes);
+      if (goldOn) prevGoldState = gState;
       if (momLike) {
         momHoldings.push({ month: d.slice(0, 7), codes: [...activeCodes], weights: { ...currentTw } });
       }
@@ -1162,6 +1264,7 @@ function backtest(
       // 2) DCA cash then 3) rebalance
       let doRebal = isRebal(prev, d);
       if (regimeHedge && isNewMonth(prev, d)) doRebal = true;
+      if (goldOn && isNewMonth(prev, d)) doRebal = true;
       if (monthlyContribution > 0 && isNewMonth(prev, d)) {
         value += monthlyContribution;
         totalInvested += monthlyContribution;
@@ -1169,12 +1272,22 @@ function backtest(
         doRebal = true;
       }
       if (doRebal) {
-        const [newTw, newActive] = targetWeights(d);
+        const [newTw, newActive, gState] = targetWeights(d);
         const newSet = new Set(newActive);
         const changed =
           prevHoldings &&
           (newSet.size !== prevHoldings.size || [...newSet].some((c) => !prevHoldings.has(c)));
         if (momLike && changed && momCost > 0) value *= 1 - momCost;
+        if (
+          goldOn &&
+          prevGoldState != null &&
+          gState != null &&
+          gState !== prevGoldState &&
+          momCost > 0
+        ) {
+          value *= 1 - momCost * goldSleeve;
+        }
+        if (goldOn) prevGoldState = gState;
         currentTw = newTw;
         activeCodes = newActive;
         units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
@@ -1263,6 +1376,9 @@ function backtest(
     regimeLog: maOverlay ? regimeLog : null,
     hedgeActive: regimeHedge ? lastHedge : null,
     hedgeLog: regimeHedge ? hedgeLog : null,
+    goldActive: goldOn ? lastGoldOn : null,
+    goldHolding: goldOn ? lastGoldHolding : null,
+    goldLog: goldOn ? goldLog : null,
   };
 }
 
@@ -1697,11 +1813,15 @@ function renderResult(r, bench, picks, corr, tax) {
     r.hedgeLog
       ? `<div class="warn">국면 헤지(실험) · 최근: <strong>${r.hedgeActive ? "헤지 소비중" : "헤지 없음"}</strong> · 신호 069500∧360750 MA↓ · 모드 ${state.regimeHedgeMode === "cash" ? "현금/단기채" : "−1x 114800"} · 상한 ${(Math.min(0.15, state.regimeHedgePct) * 100).toFixed(0)}% · 월1회 · 2X 금지 · 실험·자문 아님</div>`
       : "";
+  const goldNote =
+    r.goldLog
+      ? `<div class="warn">금 온/오프 슬리브 · 최근: <strong>${r.goldActive ? "ON" : "OFF"}</strong> · 보유 ${r.goldHolding || "—"} · 슬리브 ${(clampGoldSleeve(state.goldSleevePct) * 100).toFixed(0)}% · 룩백 ${state.goldLookback}개월 · 신호 411060 vs 214980 · 과거 시뮬 · 투자 권유 아님</div>`
+      : "";
   const weightNote =
     state.weighting === "invVol"
       ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
       : "";
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -1800,7 +1920,7 @@ function reviewAgent(r, bench, picks) {
     "· 세금·수수료 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
     "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다.",
-    "· 모멘텀·역변동성·이동평균 파라미터는 민감하며 과거≠미래입니다."
+    "· 모멘텀·역변동성·이동평균·금 슬리브 파라미터는 민감하며 과거≠미래입니다."
   );
   return lines.join("\n");
 }
@@ -1834,6 +1954,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
     const rhRow = $("#regimeHedgeRow");
     if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
+    const gRow = $("#goldOnRow");
+    if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
     syncMomControls();
   };
   $("#rebalance").onchange = (e) => {
@@ -1878,6 +2000,23 @@ document.addEventListener("DOMContentLoaded", () => {
     rhPct.onchange = (e) => {
       const v = Number(e.target.value);
       state.regimeHedgePct = Math.min(0.15, Math.max(0, Number.isFinite(v) ? v / 100 : 0.15));
+    };
+  const goldChk = $("#goldOn");
+  if (goldChk)
+    goldChk.onchange = (e) => {
+      state.goldOn = !!e.target.checked;
+      syncStratControls();
+    };
+  const goldPct = $("#goldSleevePct");
+  if (goldPct)
+    goldPct.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.goldSleevePct = clampGoldSleeve(Number.isFinite(v) ? v / 100 : GOLD_SLEEVE_DEFAULT);
+    };
+  const goldLb = $("#goldLookback");
+  if (goldLb)
+    goldLb.onchange = (e) => {
+      state.goldLookback = Number(e.target.value) >= 3 ? 3 : 1;
     };
   const maWin = $("#maWindow");
   if (maWin)

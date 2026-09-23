@@ -42,6 +42,9 @@ class Stats:
     regime_log: list | None = None
     hedge_active: bool | None = None
     hedge_log: list | None = None
+    gold_active: bool | None = None
+    gold_holding: str | None = None
+    gold_log: list | None = None
 
 
 def load(codes: list[str] | None = None):
@@ -375,6 +378,66 @@ def _resolve_regime_hedge_code(mode: str, cash_code: str, hedge_code: str | None
     return code
 
 
+
+# --- GOLDON (금 온/오프 슬리브): absolute momentum overlay, not a rebalance mode ---
+# Signal 411060 vs cash proxy 214980 (fixed). Carve sleevePct; renormalize rest.
+# Overlay order: base → invVol → maOverlay → regime hedge → gold sleeve last (G1).
+GOLD_CODE = "411060"
+GOLD_CASH = "214980"  # NEVER 0072R0 in this signature
+GOLD_COST = 0.001
+GOLD_SLEEVE_DEFAULT = 0.15
+GOLD_SLEEVE_MIN = 0.10
+GOLD_SLEEVE_MAX = 0.20
+
+
+def _clamp_gold_sleeve(sleeve_pct: float) -> float:
+    v = float(sleeve_pct) if sleeve_pct is not None else GOLD_SLEEVE_DEFAULT
+    return min(GOLD_SLEEVE_MAX, max(GOLD_SLEEVE_MIN, v))
+
+
+def _gold_signal_on(
+    signal_month: str,
+    lookback: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+) -> bool:
+    """ON iff gold lookback ret > cash lookback ret (prior month-end window). Missing → OFF."""
+    gold_ret = _lookback_return(GOLD_CODE, signal_month, lookback, month_ends_cache)
+    cash_ret = _lookback_return(GOLD_CASH, signal_month, lookback, month_ends_cache)
+    if gold_ret is None or cash_ret is None:
+        return False
+    return gold_ret > cash_ret
+
+
+def _apply_gold_sleeve(
+    tw: dict[str, float],
+    gold_on: bool,
+    sleeve_pct: float,
+) -> dict[str, float]:
+    """ON → sleeve in 411060; OFF → sleeve in 214980. Strip 411060 from rest (G1)."""
+    sleeve = _clamp_gold_sleeve(sleeve_pct)
+    rest_scale = 1.0 - sleeve
+    rest: dict[str, float] = {}
+    for c, w in tw.items():
+        if c == GOLD_CODE:
+            continue
+        if w > 0:
+            rest[c] = rest.get(c, 0.0) + w
+    s = sum(rest.values())
+    out: dict[str, float] = {}
+    if s > 0:
+        for c, w in rest.items():
+            out[c] = (w / s) * rest_scale
+    else:
+        # empty rest after strip → park remainder in cash proxy
+        out[GOLD_CASH] = rest_scale
+    hold = GOLD_CODE if gold_on else GOLD_CASH
+    out[hold] = out.get(hold, 0.0) + sleeve
+    tot = sum(out.values())
+    if tot <= 0:
+        return {GOLD_CASH: 1.0}
+    return {c: w / tot for c, w in out.items() if w > 0}
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -396,6 +459,9 @@ def backtest(
     regime_hedge_mode: str = "inverse",
     regime_hedge_pct: float = 0.15,
     regime_hedge_code: str | None = None,
+    gold_on: bool = False,
+    gold_sleeve_pct: float = GOLD_SLEEVE_DEFAULT,
+    gold_lookback: int = 1,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -409,6 +475,11 @@ def backtest(
     if need_cash:
         if cash_code not in prices:
             raise ValueError(f"안전자산 {cash_code} 시세가 없습니다")
+    if gold_on:
+        if GOLD_CODE not in prices:
+            raise ValueError(f"금 슬리브 신호용 {GOLD_CODE} 시세가 없습니다")
+        if GOLD_CASH not in prices:
+            raise ValueError(f"금 슬리브 현금대리 {GOLD_CASH} 시세가 없습니다")
     if ma_overlay and BENCH_CODE not in prices:
         raise ValueError(f"벤치마크 {BENCH_CODE} 시세가 없습니다")
 
@@ -433,6 +504,10 @@ def backtest(
         for extra in (REGIME_HEDGE_SIGNAL_A, REGIME_HEDGE_SIGNAL_B, hedge_code_res):
             if extra and extra not in calendar_codes:
                 calendar_codes.append(extra)
+    if gold_on:
+        for extra in (GOLD_CODE, GOLD_CASH):
+            if extra not in calendar_codes:
+                calendar_codes.append(extra)
 
     calendars = []
     for c in calendar_codes:
@@ -451,12 +526,20 @@ def backtest(
     ma_win = max(2, int(ma_window))
     use_inv = weighting == "invVol"
     mom_like = rebalance in ("MOM", "DMOM")
+    gold_lb = 3 if int(gold_lookback) >= 3 else 1
+    gold_sleeve = _clamp_gold_sleeve(gold_sleeve_pct)
 
     month_ends_codes = list(codes)
     if rebalance == "DMOM" and cash_code not in month_ends_codes:
         month_ends_codes.append(cash_code)
+    if gold_on:
+        for extra in (GOLD_CODE, GOLD_CASH):
+            if extra not in month_ends_codes:
+                month_ends_codes.append(extra)
     month_ends_cache = (
-        {c: _month_end_closes(prices[c]) for c in month_ends_codes} if mom_like else {}
+        {c: _month_end_closes(prices[c]) for c in month_ends_codes}
+        if (mom_like or gold_on)
+        else {}
     )
 
     units = None
@@ -477,9 +560,13 @@ def backtest(
     regime_log: list[dict] = []
     last_hedge: bool | None = None
     hedge_log: list[dict] = []
+    last_gold_on: bool | None = None
+    last_gold_holding: str | None = None
+    gold_log: list[dict] = []
+    prev_gold_state: bool | None = None
 
-    def _target_weights(d: str) -> tuple[dict[str, float], list[str]]:
-        nonlocal last_regime, last_hedge
+    def _target_weights(d: str) -> tuple[dict[str, float], list[str], bool | None]:
+        nonlocal last_regime, last_hedge, last_gold_on, last_gold_holding
         if rebalance == "MOM":
             _picked, base = _momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache
@@ -510,15 +597,32 @@ def backtest(
             pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(regime_hedge_pct)))
             base = _apply_regime_hedge(base, hedge_on, hedge_code_res, pct)
 
+        # GOLDON last so 411060 weight stays exactly 0 or sleevePct (G1)
+        gold_state = None
+        if gold_on:
+            gold_state = _gold_signal_on(d[:7], gold_lb, month_ends_cache)
+            base = _apply_gold_sleeve(base, gold_state, gold_sleeve)
+            last_gold_on = gold_state
+            last_gold_holding = GOLD_CODE if gold_state else GOLD_CASH
+            gold_log.append({
+                "date": d,
+                "month": d[:7],
+                "on": gold_state,
+                "holding": last_gold_holding,
+                "weights": dict(base),
+            })
+
         active = [c for c, w in base.items() if w > 0]
-        return base, active
+        return base, active, gold_state
 
     for d in common:
         if units is None:
             # Day 0
-            current_tw, active_codes = _target_weights(d)
+            current_tw, active_codes, g_state = _target_weights(d)
             units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
             prev_holdings = set(active_codes)
+            if gold_on:
+                prev_gold_state = g_state
             if mom_like:
                 mom_holdings.append({
                     "month": d[:7],
@@ -537,6 +641,9 @@ def backtest(
             # 국면 헤지(실험): 헤지 슬리브는 월 1회만 갱신
             if regime_hedge and _is_new_month(prev, d):
                 do_rebal = True
+            # GOLDON: month-start timing same as MOM
+            if gold_on and _is_new_month(prev, d):
+                do_rebal = True
             if monthly_contribution > 0 and _is_new_month(prev, d):
                 value += monthly_contribution
                 total_invested += monthly_contribution
@@ -545,10 +652,21 @@ def backtest(
 
             # 3) Rebalance after MTM (+ optional cash)
             if do_rebal:
-                new_tw, new_active = _target_weights(d)
+                new_tw, new_active, g_state = _target_weights(d)
                 new_set = set(new_active)
                 if mom_like and prev_holdings is not None and new_set != prev_holdings and cost > 0:
                     value *= 1.0 - cost
+                # GOLDON flip cost on sleeve notional only (value × sleevePct × 0.001)
+                if (
+                    gold_on
+                    and prev_gold_state is not None
+                    and g_state is not None
+                    and g_state != prev_gold_state
+                    and cost > 0
+                ):
+                    value *= 1.0 - cost * gold_sleeve
+                if gold_on:
+                    prev_gold_state = g_state
                 current_tw = new_tw
                 active_codes = new_active
                 units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
@@ -642,6 +760,9 @@ def backtest(
         regime_log=regime_log if ma_overlay else None,
         hedge_active=last_hedge if regime_hedge else None,
         hedge_log=hedge_log if regime_hedge else None,
+        gold_active=last_gold_on if gold_on else None,
+        gold_holding=last_gold_holding if gold_on else None,
+        gold_log=gold_log if gold_on else None,
     )
 
 
