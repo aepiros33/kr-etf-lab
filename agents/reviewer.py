@@ -2,6 +2,7 @@
 """Reviewer agent: sanity-check ingested data and backtest invariants."""
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -9,10 +10,105 @@ from build_backtest import backtest, load
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Must match app.js PRESETS weights exactly (sum == 100 each).
+PRESETS = {
+    "kAllWeather": {
+        "069500": 15,
+        "360750": 17.5,
+        "453850": 17.5,
+        "148070": 15,
+        "411060": 15,
+        "423160": 20,
+    },
+    "permanent": {
+        "069500": 12.5,
+        "360750": 12.5,
+        "148070": 12.5,
+        "453850": 12.5,
+        "411060": 25,
+        "423160": 25,
+    },
+    "global6040": {
+        "360750": 40,
+        "069500": 20,
+        "453850": 20,
+        "148070": 20,
+    },
+    "monthlyIncome": {
+        "458730": 40,
+        "329200": 20,
+        "214980": 20,
+        "441640": 20,
+    },
+}
+
 
 def fail(msg):
     print("FAIL:", msg)
     sys.exit(1)
+
+
+def log_returns(series: dict[str, float], dates: list[str]) -> list[float]:
+    out = []
+    for a, b in zip(dates, dates[1:]):
+        pa, pb = series[a], series[b]
+        if pa <= 0 or pb <= 0:
+            out.append(0.0)
+        else:
+            out.append(math.log(pb / pa))
+    return out
+
+
+def pearson_corr(xs: list[float], ys: list[float]) -> float:
+    n = min(len(xs), len(ys))
+    if n < 2:
+        return 0.0
+    sx = sy = sxx = syy = sxy = 0.0
+    for i in range(n):
+        x, y = xs[i], ys[i]
+        sx += x
+        sy += y
+        sxx += x * x
+        syy += y * y
+        sxy += x * y
+    cov = sxy - sx * sy / n
+    vx = sxx - sx * sx / n
+    vy = syy - sy * sy / n
+    if vx <= 0 or vy <= 0:
+        return 0.0
+    c = cov / math.sqrt(vx * vy)
+    if not math.isfinite(c):
+        return 0.0
+    return max(-1.0, min(1.0, c))
+
+
+def corr_matrix(codes: list[str], prices: dict, start: str = "2019-01-01") -> list[list[float]]:
+    sets = []
+    for c in codes:
+        sets.append({d for d in prices[c] if d >= start})
+    common = sorted(sets[0].intersection(*sets[1:]))
+    if len(common) < 20:
+        fail(f"corr common dates too short: {len(common)}")
+    rets = {c: log_returns(prices[c], common) for c in codes}
+    n = len(codes)
+    m = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            m[i][j] = 1.0 if i == j else pearson_corr(rets[codes[i]], rets[codes[j]])
+    return m
+
+
+def check_corr_invariants(matrix: list[list[float]], tol: float = 1e-9):
+    n = len(matrix)
+    for i in range(n):
+        if abs(matrix[i][i] - 1.0) > 1e-6:
+            fail(f"corr diagonal not 1 at {i}: {matrix[i][i]}")
+        for j in range(n):
+            v = matrix[i][j]
+            if v < -1.0 - 1e-9 or v > 1.0 + 1e-9:
+                fail(f"corr out of bounds [{i},{j}]={v}")
+            if abs(matrix[i][j] - matrix[j][i]) > tol:
+                fail(f"corr not symmetric [{i},{j}]")
 
 
 def main():
@@ -108,13 +204,31 @@ def main():
     if "069500" not in prices2:
         fail("selective load missing benchmark")
 
+    # --- Feature 5: PRESETS weight sum == 100 ---
+    meta_codes = {e["code"] for e in etfs}
+    for name, weights in PRESETS.items():
+        total = sum(weights.values())
+        if abs(total - 100) > 1e-9:
+            fail(f"preset {name} weights sum to {total}, expected 100")
+        missing = [c for c in weights if c not in meta_codes]
+        if missing:
+            fail(f"preset {name} missing from meta: {missing}")
+
+    # --- Feature 5: correlation invariants on 2–3 tickers ---
+    corr_codes = [c for c in ("069500", "148070", "360750") if c in prices]
+    if len(corr_codes) < 2:
+        fail("need >=2 tickers for corr invariants")
+    matrix = corr_matrix(corr_codes[:3], prices, start="2019-01-01")
+    check_corr_invariants(matrix)
+
     print("PASS")
     print(
         f"etfs={len(etfs)} prices={len(prices)} "
         f"kodex200_cagr={s.cagr:.2%} mdd={s.mdd:.2%} "
         f"mixed_cagr={mixed_q.cagr:.2%} "
         f"dca_cagr={dca.cagr:.2%} lump_cagr={lump.cagr:.2%} "
-        f"dca_invested={dca.total_invested:.0f}"
+        f"dca_invested={dca.total_invested:.0f} "
+        f"presets={len(PRESETS)} corr_n={len(corr_codes[:3])}"
     )
 
 
