@@ -133,6 +133,7 @@ const state = {
   goldOn: false,
   goldSleevePct: 0.15, // UI 10–20%
   goldLookback: 1, // 1|3
+  goldCode: "411060", // 411060 spot | 132030 futures long
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -688,7 +689,7 @@ async function run() {
     else extra.push(state.cashCode || "214980");
   }
   if (needGold) {
-    extra.push(GOLD_CODE, GOLD_CASH);
+    extra.push(resolveGoldCode(state.goldCode), GOLD_CASH);
   }
   await ensurePrices([...codes, ...extra]);
   for (const c of codes) {
@@ -724,8 +725,9 @@ async function run() {
     }
   }
   if (needGold) {
-    if (!state.prices[GOLD_CODE]) {
-      $("#result").innerHTML = `<div class="card pad empty">금 슬리브 신호용 ${GOLD_CODE} 시세가 없습니다.</div>`;
+    const gCode = resolveGoldCode(state.goldCode);
+    if (!state.prices[gCode]) {
+      $("#result").innerHTML = `<div class="card pad empty">금 슬리브 신호용 ${gCode} 시세가 없습니다.</div>`;
       return;
     }
     if (!state.prices[GOLD_CASH]) {
@@ -751,7 +753,7 @@ async function run() {
       BENCH,
       ...(needCash ? [state.cashCode || "214980"] : []),
       ...hedgeLoad,
-      ...(needGold ? [GOLD_CODE, GOLD_CASH] : []),
+      ...(needGold ? [resolveGoldCode(state.goldCode), GOLD_CASH] : []),
     ]),
   ];
   const priceMap = state.totalReturn
@@ -786,6 +788,7 @@ async function run() {
       goldOn: state.goldOn,
       goldSleevePct: clampGoldSleeve(state.goldSleevePct),
       goldLookback: state.goldLookback,
+      goldCode: resolveGoldCode(state.goldCode),
     }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
@@ -1030,28 +1033,36 @@ function resolveRegimeHedgeCode(mode, cashCode, hedgeCode) {
 // --- GOLDON (금 온/오프 슬리브): sync with agents/build_backtest.py ---
 // Overlay order: base → invVol → maOverlay → regime → gold last (G1).
 const GOLD_CODE = "411060";
+const GOLD_CODE_FUTURES = "132030"; // long KRX gold futures (H)
 const GOLD_CASH = "214980"; // fixed; NEVER 0072R0
 const GOLD_COST = 0.001;
 const GOLD_SLEEVE_DEFAULT = 0.15;
+const GOLD_CODES_ALLOWED = ["411060", "132030", "139320", "319640"];
 
 function clampGoldSleeve(pct) {
   const v = pct != null ? Number(pct) : GOLD_SLEEVE_DEFAULT;
   return Math.min(0.2, Math.max(0.1, Number.isFinite(v) ? v : GOLD_SLEEVE_DEFAULT));
 }
 
-function goldSignalOn(signalMonth, lookback, monthEndsCache) {
-  const goldRet = lookbackReturn(GOLD_CODE, signalMonth, lookback, monthEndsCache);
+function resolveGoldCode(code) {
+  if (code == null || String(code).trim() === "") return GOLD_CODE;
+  const c = String(code).trim().padStart(6, "0");
+  return c;
+}
+
+function goldSignalOn(signalMonth, lookback, monthEndsCache, goldCode = GOLD_CODE) {
+  const goldRet = lookbackReturn(goldCode, signalMonth, lookback, monthEndsCache);
   const cashRet = lookbackReturn(GOLD_CASH, signalMonth, lookback, monthEndsCache);
   if (goldRet == null || cashRet == null) return false;
   return goldRet > cashRet;
 }
 
-function applyGoldSleeve(tw, goldOn, sleevePct) {
+function applyGoldSleeve(tw, goldOn, sleevePct, goldCode = GOLD_CODE) {
   const sleeve = clampGoldSleeve(sleevePct);
   const restScale = 1 - sleeve;
   const rest = {};
   for (const [c, w] of Object.entries(tw)) {
-    if (c === GOLD_CODE) continue;
+    if (c === goldCode) continue;
     if (w > 0) rest[c] = (rest[c] || 0) + w;
   }
   const s = Object.values(rest).reduce((a, b) => a + b, 0);
@@ -1061,7 +1072,7 @@ function applyGoldSleeve(tw, goldOn, sleevePct) {
   } else {
     out[GOLD_CASH] = restScale;
   }
-  const hold = goldOn ? GOLD_CODE : GOLD_CASH;
+  const hold = goldOn ? goldCode : GOLD_CASH;
   out[hold] = (out[hold] || 0) + sleeve;
   const tot = Object.values(out).reduce((a, b) => a + b, 0);
   if (!(tot > 0)) return { [GOLD_CASH]: 1 };
@@ -1108,6 +1119,7 @@ function backtest(
   const goldOn = !!opts.goldOn;
   const goldSleeve = clampGoldSleeve(opts.goldSleevePct != null ? opts.goldSleevePct : GOLD_SLEEVE_DEFAULT);
   const goldLb = Number(opts.goldLookback) >= 3 ? 3 : 1;
+  const goldHold = resolveGoldCode(opts.goldCode);
   let hedgeCodeRes = null;
   if (regimeHedge) {
     try {
@@ -1123,7 +1135,7 @@ function backtest(
     return { error: `안전자산 ${cashCode} 시세가 없습니다.` };
   }
   if (goldOn) {
-    if (!priceMap[GOLD_CODE]) return { error: `금 슬리브 신호용 ${GOLD_CODE} 시세가 없습니다.` };
+    if (!priceMap[goldHold]) return { error: `금 슬리브 신호용 ${goldHold} 시세가 없습니다.` };
     if (!priceMap[GOLD_CASH]) return { error: `금 슬리브 현금대리 ${GOLD_CASH} 시세가 없습니다.` };
   }
   if (maOverlay && !priceMap[BENCH]) {
@@ -1146,7 +1158,7 @@ function backtest(
     }
   }
   if (goldOn) {
-    for (const extra of [GOLD_CODE, GOLD_CASH]) {
+    for (const extra of [goldHold, GOLD_CASH]) {
       if (!calendarCodes.includes(extra)) calendarCodes.push(extra);
     }
   }
@@ -1163,7 +1175,7 @@ function backtest(
   const monthEndsCodes = [...codes];
   if (rebalance === "DMOM" && !monthEndsCodes.includes(cashCode)) monthEndsCodes.push(cashCode);
   if (goldOn) {
-    for (const extra of [GOLD_CODE, GOLD_CASH]) {
+    for (const extra of [goldHold, GOLD_CASH]) {
       if (!monthEndsCodes.includes(extra)) monthEndsCodes.push(extra);
     }
   }
@@ -1240,13 +1252,13 @@ function backtest(
       hedgeLog.push({ date: d, hedge: hedgeOn });
       base = applyRegimeHedge(base, hedgeOn, hedgeCodeRes, regimeHedgePct);
     }
-    // GOLDON last so 411060 weight stays exactly 0 or sleevePct (G1)
+    // GOLDON last so goldHold weight stays exactly 0 or sleevePct (G1)
     let goldState = null;
     if (goldOn) {
-      goldState = goldSignalOn(d.slice(0, 7), goldLb, monthEndsCache);
-      base = applyGoldSleeve(base, goldState, goldSleeve);
+      goldState = goldSignalOn(d.slice(0, 7), goldLb, monthEndsCache, goldHold);
+      base = applyGoldSleeve(base, goldState, goldSleeve, goldHold);
       lastGoldOn = goldState;
-      lastGoldHolding = goldState ? GOLD_CODE : GOLD_CASH;
+      lastGoldHolding = goldState ? goldHold : GOLD_CASH;
       goldLog.push({
         date: d,
         month: d.slice(0, 7),
@@ -1829,7 +1841,7 @@ function renderResult(r, bench, picks, corr, tax) {
       : "";
   const goldNote =
     r.goldLog
-      ? `<div class="warn">금 온/오프 슬리브 · 최근: <strong>${r.goldActive ? "ON" : "OFF"}</strong> · 보유 ${r.goldHolding || "—"} · 슬리브 ${(clampGoldSleeve(state.goldSleevePct) * 100).toFixed(0)}% · 룩백 ${state.goldLookback}개월 · 신호 411060 vs 214980 · 과거 시뮬 · 투자 권유 아님</div>`
+      ? `<div class="warn">금 온/오프 슬리브 · 최근: <strong>${r.goldActive ? "ON" : "OFF"}</strong> · 보유 ${r.goldHolding || "—"} · 슬리브 ${(clampGoldSleeve(state.goldSleevePct) * 100).toFixed(0)}% · 룩백 ${state.goldLookback}개월 · 신호 ${resolveGoldCode(state.goldCode)} vs 214980 · 과거 시뮬 · 투자 권유 아님</div>`
       : "";
   const weightNote =
     state.weighting === "invVol"
@@ -2032,6 +2044,13 @@ document.addEventListener("DOMContentLoaded", () => {
     goldLb.onchange = (e) => {
       state.goldLookback = Number(e.target.value) >= 3 ? 3 : 1;
     };
+  const goldCodeEl = $("#goldCode");
+  if (goldCodeEl) {
+    goldCodeEl.value = resolveGoldCode(state.goldCode);
+    goldCodeEl.onchange = (e) => {
+      state.goldCode = resolveGoldCode(e.target.value);
+    };
+  }
   const maWin = $("#maWindow");
   if (maWin)
     maWin.onchange = (e) => {

@@ -130,8 +130,14 @@
               <option value="3">3개월</option>
             </select>
           </label>
+          <label class="field">금 종목
+            <select id="goldCode">
+              <option value="411060" selected>금현물 411060</option>
+              <option value="132030">금선물 132030 (장기)</option>
+            </select>
+          </label>
         </div>
-        <p class="muted-note">전월 말 금 절대모멘텀이 단기채보다 높을 때만 금 슬리브 유지 · 과거 시뮬 · 투자 권유 아님</p>
+        <p class="muted-note">전월 말 금 절대모멘텀이 단기채보다 높을 때만 금 슬리브 유지 · 선물(H)≠현물 · 환헤지·롤 비용은 기존 전환비용 외 미모형 · 과거 시뮬 · 투자 권유 아님</p>
         <div class="row" id="customDates" style="display:none">
           <input type="date" id="startDate" value="2021-01-01" />
           <input type="date" id="endDate" value="2026-09-23" />
@@ -202,9 +208,9 @@
       Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
-      KRX 원자재 ETF 상당수는 선물·환헤지(H)이나, 본 슬리브 기본종목 ACE KRX금현물(411060)은 금 현물 추종이라 선물 롤 손익과 다를 수 있음.
+      금 슬리브 기본은 ACE KRX금현물(411060). 장기 시뮬용으로 KODEX 골드선물(H)(132030) 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형).
     </p>
   </div>
-  <script src="./app.js?v=goldon3"></script>
+  <script src="./app.js?v=goldon4"></script>
 </body>
 </html>

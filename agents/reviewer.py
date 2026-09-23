@@ -616,12 +616,15 @@ def main():
     # --- GOLDON (금 온/오프 슬리브) G1/G2 ---
     from build_backtest import (
         GOLD_CODE,
+        GOLD_CODE_FUTURES,
         GOLD_CASH,
+        GOLD_CODES_ALLOWED,
         _apply_gold_sleeve,
         _gold_signal_on,
         _lookback_return,
         _month_end_closes,
         _clamp_gold_sleeve,
+        _resolve_gold_code,
     )
     # Unit: sleeve ON → 411060 == sleevePct; OFF → 411060 == 0
     on_w = _apply_gold_sleeve({"069500": 0.7, "148070": 0.3, GOLD_CODE: 0.2}, True, 0.15)
@@ -656,7 +659,8 @@ def main():
             fail("GOLDON missing gold_log")
         if g.gold_active is None or g.gold_holding is None:
             fail("GOLDON missing gold_active/holding")
-        if g.gold_holding not in (GOLD_CODE, GOLD_CASH):
+        allowed_hold = set(GOLD_CODES_ALLOWED) | {GOLD_CASH}
+        if g.gold_holding not in allowed_hold:
             fail(f"GOLDON holding unexpected: {g.gold_holding}")
 
         # G1: after warmup, at each monthly rebalance eval weight(411060) is 0 or sleevePct
@@ -727,6 +731,31 @@ def main():
             prev = e["on"]
         if flips > 0 and abs(g0.total_return - g1.total_return) < 1e-15:
             fail("GOLDON flip cost should change path when flips>0")
+
+        # Optional long gold futures sleeve (explicit gold_code; does not replace default)
+        if GOLD_CODE_FUTURES in prices and _resolve_gold_code(None) == GOLD_CODE:
+            gf = backtest(
+                g_uni,
+                prices,
+                start="2016-09-23",
+                rebalance="Q",
+                gold_on=True,
+                gold_sleeve_pct=0.15,
+                gold_lookback=1,
+                gold_code=GOLD_CODE_FUTURES,
+                mom_cost=0.001,
+            )
+            if gf.gold_holding not in (GOLD_CODE_FUTURES, GOLD_CASH):
+                fail(f"GOLDON futures holding unexpected: {gf.gold_holding}")
+            if gf.start > "2017-01-01":
+                fail(f"GOLDON futures 10y start too late: {gf.start}")
+            for i, entry in enumerate(gf.gold_log or []):
+                if i < 2:
+                    continue
+                wmap = entry.get("weights") or {}
+                wgf = float(wmap.get(GOLD_CODE_FUTURES, 0.0))
+                if abs(wgf) > 1e-9 and abs(wgf - 0.15) > 1e-9:
+                    fail(f"G1 futures month {entry.get('month')}: {GOLD_CODE_FUTURES} w={wgf}")
 
 
     # Presets must never include inverse/leverage 114800 / 252670

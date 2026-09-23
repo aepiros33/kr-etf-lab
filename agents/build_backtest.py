@@ -73,17 +73,27 @@ def load(codes: list[str] | None = None):
                 continue
             prices[code] = {r["d"]: r["c"] for r in rows}
 
-    # Per-file overrides / fills (selective load)
+    # Per-file overrides / fills (selective load).
+    # Prefer per-file when it has earlier or longer history than the bundle
+    # (e.g. after a --merge extend of older years).
     if PRICES_DIR.exists():
         files = list(PRICES_DIR.glob("*.json"))
         for path in files:
             code = path.stem
             if want is not None and code not in want:
                 continue
-            if code in prices:
-                continue
             rows = json.loads(path.read_text(encoding="utf-8"))
-            prices[code] = {r["d"]: r["c"] for r in rows}
+            file_map = {r["d"]: r["c"] for r in rows}
+            if code not in prices:
+                prices[code] = file_map
+                continue
+            bundle_dates = sorted(prices[code])
+            file_dates = sorted(file_map)
+            if not bundle_dates or (
+                file_dates
+                and (file_dates[0] < bundle_dates[0] or len(file_dates) > len(bundle_dates))
+            ):
+                prices[code] = file_map
 
     if "prices" not in raw:
         raw["prices"] = {
@@ -380,14 +390,17 @@ def _resolve_regime_hedge_code(mode: str, cash_code: str, hedge_code: str | None
 
 
 # --- GOLDON (금 온/오프 슬리브): absolute momentum overlay, not a rebalance mode ---
-# Signal 411060 vs cash proxy 214980 (fixed). Carve sleevePct; renormalize rest.
+# Signal gold_code vs cash proxy 214980 (fixed). Carve sleevePct; renormalize rest.
+# Default gold_code=411060 (spot). Long-history proxy: 132030 KODEX 골드선물(H).
 # Overlay order: base → invVol → maOverlay → regime hedge → gold sleeve last (G1).
 GOLD_CODE = "411060"
+GOLD_CODE_FUTURES = "132030"  # long KRX gold futures (H); not a silent default swap
 GOLD_CASH = "214980"  # NEVER 0072R0 in this signature
 GOLD_COST = 0.001
 GOLD_SLEEVE_DEFAULT = 0.15
 GOLD_SLEEVE_MIN = 0.10
 GOLD_SLEEVE_MAX = 0.20
+GOLD_CODES_ALLOWED = ("411060", "132030", "139320", "319640")
 
 
 def _clamp_gold_sleeve(sleeve_pct: float) -> float:
@@ -395,13 +408,21 @@ def _clamp_gold_sleeve(sleeve_pct: float) -> float:
     return min(GOLD_SLEEVE_MAX, max(GOLD_SLEEVE_MIN, v))
 
 
+def _resolve_gold_code(gold_code: str | None) -> str:
+    if gold_code is None or str(gold_code).strip() == "":
+        return GOLD_CODE
+    code = str(gold_code).strip().zfill(6)
+    return code
+
+
 def _gold_signal_on(
     signal_month: str,
     lookback: int,
     month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+    gold_code: str = GOLD_CODE,
 ) -> bool:
     """ON iff gold lookback ret > cash lookback ret (prior month-end window). Missing → OFF."""
-    gold_ret = _lookback_return(GOLD_CODE, signal_month, lookback, month_ends_cache)
+    gold_ret = _lookback_return(gold_code, signal_month, lookback, month_ends_cache)
     cash_ret = _lookback_return(GOLD_CASH, signal_month, lookback, month_ends_cache)
     if gold_ret is None or cash_ret is None:
         return False
@@ -412,13 +433,14 @@ def _apply_gold_sleeve(
     tw: dict[str, float],
     gold_on: bool,
     sleeve_pct: float,
+    gold_code: str = GOLD_CODE,
 ) -> dict[str, float]:
-    """ON → sleeve in 411060; OFF → sleeve in 214980. Strip 411060 from rest (G1)."""
+    """ON → sleeve in gold_code; OFF → sleeve in 214980. Strip gold_code from rest (G1)."""
     sleeve = _clamp_gold_sleeve(sleeve_pct)
     rest_scale = 1.0 - sleeve
     rest: dict[str, float] = {}
     for c, w in tw.items():
-        if c == GOLD_CODE:
+        if c == gold_code:
             continue
         if w > 0:
             rest[c] = rest.get(c, 0.0) + w
@@ -430,7 +452,7 @@ def _apply_gold_sleeve(
     else:
         # empty rest after strip → park remainder in cash proxy
         out[GOLD_CASH] = rest_scale
-    hold = GOLD_CODE if gold_on else GOLD_CASH
+    hold = gold_code if gold_on else GOLD_CASH
     out[hold] = out.get(hold, 0.0) + sleeve
     tot = sum(out.values())
     if tot <= 0:
@@ -462,6 +484,7 @@ def backtest(
     gold_on: bool = False,
     gold_sleeve_pct: float = GOLD_SLEEVE_DEFAULT,
     gold_lookback: int = 1,
+    gold_code: str | None = None,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -475,9 +498,10 @@ def backtest(
     if need_cash:
         if cash_code not in prices:
             raise ValueError(f"안전자산 {cash_code} 시세가 없습니다")
+    gold_hold = _resolve_gold_code(gold_code)
     if gold_on:
-        if GOLD_CODE not in prices:
-            raise ValueError(f"금 슬리브 신호용 {GOLD_CODE} 시세가 없습니다")
+        if gold_hold not in prices:
+            raise ValueError(f"금 슬리브 신호용 {gold_hold} 시세가 없습니다")
         if GOLD_CASH not in prices:
             raise ValueError(f"금 슬리브 현금대리 {GOLD_CASH} 시세가 없습니다")
     if ma_overlay and BENCH_CODE not in prices:
@@ -505,7 +529,7 @@ def backtest(
             if extra and extra not in calendar_codes:
                 calendar_codes.append(extra)
     if gold_on:
-        for extra in (GOLD_CODE, GOLD_CASH):
+        for extra in (gold_hold, GOLD_CASH):
             if extra not in calendar_codes:
                 calendar_codes.append(extra)
 
@@ -533,7 +557,7 @@ def backtest(
     if rebalance == "DMOM" and cash_code not in month_ends_codes:
         month_ends_codes.append(cash_code)
     if gold_on:
-        for extra in (GOLD_CODE, GOLD_CASH):
+        for extra in (gold_hold, GOLD_CASH):
             if extra not in month_ends_codes:
                 month_ends_codes.append(extra)
     month_ends_cache = (
@@ -597,13 +621,13 @@ def backtest(
             pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(regime_hedge_pct)))
             base = _apply_regime_hedge(base, hedge_on, hedge_code_res, pct)
 
-        # GOLDON last so 411060 weight stays exactly 0 or sleevePct (G1)
+        # GOLDON last so gold_hold weight stays exactly 0 or sleevePct (G1)
         gold_state = None
         if gold_on:
-            gold_state = _gold_signal_on(d[:7], gold_lb, month_ends_cache)
-            base = _apply_gold_sleeve(base, gold_state, gold_sleeve)
+            gold_state = _gold_signal_on(d[:7], gold_lb, month_ends_cache, gold_hold)
+            base = _apply_gold_sleeve(base, gold_state, gold_sleeve, gold_hold)
             last_gold_on = gold_state
-            last_gold_holding = GOLD_CODE if gold_state else GOLD_CASH
+            last_gold_holding = gold_hold if gold_state else GOLD_CASH
             gold_log.append({
                 "date": d,
                 "month": d[:7],
