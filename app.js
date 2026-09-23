@@ -733,7 +733,7 @@ function backtest(weights, priceMap, start, end, rebalance, initialCapital = 1, 
     } else {
       // 1) Mark to market
       value = codes.reduce((s, c) => s + units[c] * px[c], 0);
-      if (prevValue != null && prevValue > 0) rets.push(value / prevValue - 1);
+      if (prevValue != null && prevValue > 0) rets.push([d, value / prevValue - 1]);
 
       // 2) DCA cash then 3) rebalance
       let doRebal = isRebal(prev, d);
@@ -760,25 +760,44 @@ function backtest(weights, priceMap, start, end, rebalance, initialCapital = 1, 
     prevValue = value;
   }
 
-  const yearly = {},
-    byY = {};
-  curve.forEach(({ d, v }) => {
-    (byY[d.slice(0, 4)] ||= []).push(v);
-  });
-  Object.entries(byY).forEach(([y, vs]) => (yearly[y] = vs[vs.length - 1] / vs[0] - 1));
+  // Calendar yearly: lump = last/prior-year-end (or start); DCA = compound daily MTM TWR
+  const yearly = {};
+  if (monthlyContribution > 0) {
+    const byYRets = {};
+    for (const [d, r] of rets) (byYRets[d.slice(0, 4)] ||= []).push(r);
+    for (const [y, rs] of Object.entries(byYRets)) {
+      let acc = 1;
+      for (const r of rs) acc *= 1 + r;
+      yearly[y] = acc - 1;
+    }
+    for (const { d } of curve) if (yearly[d.slice(0, 4)] == null) yearly[d.slice(0, 4)] = 0;
+  } else {
+    const lastByY = {};
+    for (const { d, v } of curve) lastByY[d.slice(0, 4)] = v;
+    const yearsSorted = Object.keys(lastByY).sort();
+    const firstPoint = curve[0].v;
+    let prevEnd = null;
+    for (const y of yearsSorted) {
+      const last = lastByY[y];
+      const base = prevEnd == null ? firstPoint : prevEnd;
+      yearly[y] = last / base - 1;
+      prevEnd = last;
+    }
+  }
 
   const days = curve.length - 1,
     years = days / 252;
   const finalValue = prevValue;
   const totalRet = finalValue / totalInvested - 1;
   const cagr = years > 0 ? Math.pow(finalValue / totalInvested, 1 / years) - 1 : 0;
-  const mean = rets.reduce((a, b) => a + b, 0) / (rets.length || 1);
+  const retVals = rets.map(([, r]) => r);
+  const mean = retVals.reduce((a, b) => a + b, 0) / (retVals.length || 1);
   const variance =
-    rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length > 1 ? rets.length - 1 : 1);
+    retVals.reduce((a, b) => a + (b - mean) ** 2, 0) / (retVals.length > 1 ? retVals.length - 1 : 1);
   const std = Math.sqrt(variance),
     vol = std * Math.sqrt(252),
     rf = 0.03 / 252;
-  const ex = rets.map((r) => r - rf);
+  const ex = retVals.map((r) => r - rf);
   const meanEx = ex.reduce((a, b) => a + b, 0) / (ex.length || 1);
   const sharpe = std ? (meanEx / std) * Math.sqrt(252) : 0;
   const yvals = Object.values(yearly);
@@ -1198,7 +1217,7 @@ function renderResult(r, bench, picks, corr, tax) {
         b = bench.yearly && bench.yearly[y];
       return `<tr><td>${y}</td><td class="${cls(a)}">${pct(a)}</td><td class="${cls(b)}">${pct(b)}</td></tr>`;
     })
-    .join("")}</tbody></table><div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+    .join("")}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 첫·마지막 해는 기간이 짧을 수 있음.</div><div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);

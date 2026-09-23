@@ -150,7 +150,7 @@ def backtest(
             # 1) Mark to market
             value = sum(units[c] * px[c] for c in codes)
             if prev_value is not None and prev_value > 0:
-                rets.append(value / prev_value - 1.0)
+                rets.append((d, value / prev_value - 1.0))
 
             # 2) Monthly DCA cash inflow on first trading day of new month
             do_rebal = _is_rebal(prev, d, rebalance)
@@ -181,19 +181,41 @@ def backtest(
     total = end_v / total_invested - 1.0
     cagr = (end_v / total_invested) ** (1 / years) - 1 if years > 0 else 0.0
 
-    # Yearly calendar returns on wealth path (indexed to initial capital).
+    # Calendar yearly returns:
+    # lump: last_of_year / (first backtest point | prior year-end) - 1
+    # DCA: compound daily MTM rets within each calendar year (TWR, pre-cashflow)
     yearly = {}
-    by_year = {}
-    for d, v, _inv in curve:
-        by_year.setdefault(d[:4], []).append(v / initial_capital)
-    for y, vs in by_year.items():
-        yearly[y] = vs[-1] / vs[0] - 1.0
+    if monthly_contribution > 0:
+        by_year_rets: dict[str, list[float]] = {}
+        for d, r in rets:
+            by_year_rets.setdefault(d[:4], []).append(r)
+        for y, rs in by_year_rets.items():
+            acc = 1.0
+            for r in rs:
+                acc *= 1.0 + r
+            yearly[y] = acc - 1.0
+        # Ensure years that appear on the curve (e.g. single day) still exist
+        for d, _v, _inv in curve:
+            yearly.setdefault(d[:4], 0.0)
+    else:
+        last_by_year: dict[str, float] = {}
+        for d, v, _inv in curve:
+            last_by_year[d[:4]] = v
+        years_sorted = sorted(last_by_year.keys())
+        first_point = curve[0][1]
+        prev_end = None
+        for y in years_sorted:
+            last = last_by_year[y]
+            base = first_point if prev_end is None else prev_end
+            yearly[y] = last / base - 1.0
+            prev_end = last
 
-    vol = statistics.stdev(rets) * (252 ** 0.5) if len(rets) > 2 else 0.0
+    ret_vals = [r for _d, r in rets]
+    vol = statistics.stdev(ret_vals) * (252 ** 0.5) if len(ret_vals) > 2 else 0.0
     rf = 0.03 / 252
-    excess = [r - rf for r in rets]
+    excess = [r - rf for r in ret_vals]
     mean_ex = sum(excess) / len(excess) if excess else 0
-    std = statistics.stdev(rets) if len(rets) > 2 else 0
+    std = statistics.stdev(ret_vals) if len(ret_vals) > 2 else 0
     sharpe = (mean_ex / std) * (252 ** 0.5) if std else 0.0
     ys = list(yearly.values())
     # Curve: (date, wealth÷initial, cum_return vs invested_to_date).

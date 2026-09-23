@@ -271,6 +271,24 @@ def main():
             if abs(end_ret - (v - 1.0)) > 1e-12:
                 fail(f"{label} ret != v-1 for non-DCA: {end_ret} vs {v - 1.0}")
 
+    # --- Yearly calendar returns compound to total_return (lump-sum only) ---
+    # Prior-year-end method: product(1+yearly) - 1 == total_return
+    for label, stats in (("kodex_lump", s), ("mixed_lump", lump)):
+        if not stats.yearly:
+            fail(f"{label} missing yearly")
+        acc = 1.0
+        for y in sorted(stats.yearly.keys()):
+            acc *= 1.0 + stats.yearly[y]
+        compound = acc - 1.0
+        if abs(compound - stats.total_return) > 1e-9:
+            fail(
+                f"{label} yearly compound {compound} != total_return {stats.total_return}"
+            )
+        # First/last year may be partial but must still be present and finite
+        years = sorted(stats.yearly.keys())
+        if abs(stats.yearly[years[0]]) > 10 or abs(stats.yearly[years[-1]]) > 10:
+            fail(f"{label} implausible partial-year return")
+
     # --- Drawdown helpers: maxDD matches engine mdd ---
     dd = compute_drawdown(s.curve)
     if abs(dd["maxDD"] - s.mdd) > 1e-12:
