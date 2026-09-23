@@ -55,6 +55,33 @@
           </label>
         </div>
 
+        <div class="section-title">분배금 · 총수익</div>
+        <label class="toggle">
+          <input type="checkbox" id="trOn" />
+          <span>분배금 재투자 (Total Return)</span>
+        </label>
+        <p class="muted-note">분배율은 모델값이며 실제 분배금과 다를 수 있음.</p>
+
+        <div class="section-title">계좌 · 세금 모형 (단순화)</div>
+        <label class="toggle">
+          <input type="radio" name="accountType" id="acctTaxable" value="taxable" checked />
+          <span>일반 계좌 (배당·양도 모형 15.4%)</span>
+        </label>
+        <label class="toggle">
+          <input type="radio" name="accountType" id="acctPension" value="pension" />
+          <span>연금저축/IRP/ISA (인출 시 연금소득세 모형)</span>
+        </label>
+        <div class="row" id="pensionTaxRow" style="display:none">
+          <label class="field">연금소득세율
+            <select id="pensionTaxRate">
+              <option value="0.033">3.3%</option>
+              <option value="0.044" selected>4.4% (중간)</option>
+              <option value="0.055">5.5%</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">세금·IRP 안전자산 표시는 단순 참고 모형이며 세무·법률 자문이 아닙니다.</p>
+
         <div class="section-title">ETF 검색 · 필터</div>
         <div class="row">
           <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
@@ -64,6 +91,7 @@
         <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
         <div class="etf-list" id="etfList"></div>
         <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화 · 시세는 선택 종목만 로드</span></div>
+        <div id="irpWarn" class="irp-warn" style="display:none"></div>
         <button class="primary" id="run">백테스트 실행</button>
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
@@ -71,7 +99,8 @@
     <p class="foot">
       투자 자문이 아닙니다. 과거 수익률은 미래 수익을 보장하지 않습니다.
       시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
-      월 적립 수익률은 납입 원금 합 대비입니다.
+      Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
+      월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
     </p>
   </div>
   <script src="./app.js"></script>

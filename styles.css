@@ -131,3 +131,54 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
 .muted-note { font-size: 11px; color: var(--dim); margin: -4px 0 10px; }
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-thumb { background: #2c3948; border-radius: 8px; }
+
+/* Correlation matrix */
+.corr-card { margin-top: 16px; }
+.corr-scroll { overflow-x: auto; }
+.corr-table {
+  width: max-content; min-width: 100%;
+  border-collapse: collapse; font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.corr-table th, .corr-table td {
+  padding: 5px 6px; text-align: center;
+  border: 1px solid rgba(39,49,64,.7);
+  white-space: nowrap;
+}
+.corr-table thead th, .corr-table tbody th {
+  color: var(--dim); font-weight: 600; background: #121922;
+  max-width: 72px; overflow: hidden; text-overflow: ellipsis;
+}
+.corr-cell { color: #0b0f14; font-weight: 700; min-width: 42px; }
+
+/* Tax comparison */
+.tax-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px;
+}
+@media (max-width: 900px) { .tax-grid { grid-template-columns: repeat(2, 1fr); } }
+.tax-grid .label { color: var(--muted); font-size: 11px; }
+.tax-grid .val { font-size: 16px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+/* IRP warning */
+.irp-warn {
+  background: rgba(240,194,122,.1);
+  border: 1px solid rgba(240,194,122,.45);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--accent2);
+  line-height: 1.45;
+}
+.irp-badge {
+  display: inline-block;
+  background: rgba(240,194,122,.2);
+  border: 1px solid rgba(240,194,122,.5);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.irp-hint { color: var(--muted); font-size: 11px; margin-top: 6px; }
