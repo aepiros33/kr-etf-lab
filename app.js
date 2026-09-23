@@ -437,38 +437,42 @@ function updateSum() {
   $("#sum").style.color = Math.abs(sum - 100) < 1e-6 ? "var(--accent)" : "var(--accent2)";
 }
 
-/** Selective price loader: selected tickers + benchmark only. */
+/** Selective price loader: selected tickers + benchmark only.
+ * Prefer etf_prices.json bundle first (GitHub Pages does not ship data/prices/).
+ * Per-ticker files are a local/dev fallback only — avoids console 404 noise on Pages.
+ */
 async function ensurePrices(codes) {
   const need = [...new Set([...codes, BENCH])].filter((c) => !state.prices[c]);
   if (!need.length) return;
   state.loadingPrices = true;
   try {
-    const loaded = await Promise.all(
-      need.map(async (code) => {
-        try {
-          const res = await fetch(`./data/prices/${code}.json`);
-          if (!res.ok) return null;
-          const rows = await res.json();
-          return [code, Object.fromEntries(rows.map((r) => [r.d, r.c]))];
-        } catch {
-          return null;
-        }
-      })
-    );
-    let missing = [];
-    loaded.forEach((pair, i) => {
-      if (pair) state.prices[pair[0]] = pair[1];
-      else missing.push(need[i]);
-    });
-    if (missing.length) {
-      const res = await fetch("./data/etf_prices.json");
-      if (res.ok) {
-        const bundle = await res.json();
-        missing.forEach((code) => {
-          const rows = bundle.prices && bundle.prices[code];
-          if (rows) state.prices[code] = Object.fromEntries(rows.map((r) => [r.d, r.c]));
-        });
+    if (!state._priceBundle) {
+      try {
+        const res = await fetch("./data/etf_prices.json");
+        if (res.ok) state._priceBundle = await res.json();
+      } catch {
+        /* ignore */
       }
+    }
+    const missing = [];
+    for (const code of need) {
+      const rows = state._priceBundle && state._priceBundle.prices && state._priceBundle.prices[code];
+      if (rows) state.prices[code] = Object.fromEntries(rows.map((r) => [r.d, r.c]));
+      else missing.push(code);
+    }
+    if (missing.length) {
+      await Promise.all(
+        missing.map(async (code) => {
+          try {
+            const res = await fetch(`./data/prices/${code}.json`);
+            if (!res.ok) return;
+            const rows = await res.json();
+            state.prices[code] = Object.fromEntries(rows.map((r) => [r.d, r.c]));
+          } catch {
+            /* ignore */
+          }
+        })
+      );
     }
   } finally {
     state.loadingPrices = false;
