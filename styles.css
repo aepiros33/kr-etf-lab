@@ -182,3 +182,42 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
   vertical-align: middle;
 }
 .irp-hint { color: var(--muted); font-size: 11px; margin-top: 6px; }
+
+/* Underwater drawdown */
+.dd-card { margin-top: 16px; }
+.dd-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin: 8px 0 12px;
+}
+@media (max-width: 900px) {
+  .dd-stats { grid-template-columns: repeat(2, 1fr); }
+}
+.dd-stats .label { color: var(--muted); font-size: 11px; }
+.dd-stats .val {
+  font-size: 15px; font-weight: 800; margin-top: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.dd-chart-wrap { padding: 4px 8px 12px; height: 220px; }
+
+/* Rolling CAGR */
+.rolling-card { margin-top: 16px; }
+.rolling-toolbar {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.rolling-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rolling-stats {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 8px 0 4px;
+}
+.rolling-stats .chip {
+  cursor: default;
+  font-variant-numeric: tabular-nums;
+}
+.rolling-stats .chip .k {
+  color: var(--dim); margin-right: 4px; font-weight: 600;
+}
+.rolling-chart-wrap { padding: 4px 8px 12px; height: 240px; }

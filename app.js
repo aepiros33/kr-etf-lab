@@ -61,6 +61,8 @@ const CAT_YIELD = {
   테마: 0.02,
 };
 
+const ROLLING_WINDOWS = { "1y": 252, "3y": 756, "5y": 1260, "10y": 2520 };
+
 const state = {
   meta: null,
   prices: {},
@@ -68,6 +70,11 @@ const state = {
   period: "5y",
   rebalance: "Q",
   chart: null,
+  ddChart: null,
+  rollingChart: null,
+  rollingWindow: "3y",
+  lastPortCurve: null,
+  lastBenchCurve: null,
   search: "",
   category: "전체",
   dcaOn: false,
@@ -703,9 +710,355 @@ function backtest(weights, priceMap, start, end, rebalance, initialCapital = 1, 
   };
 }
 
+
+/** Mirror agents/build_backtest.compute_drawdown — numbers only. */
+function computeDrawdown(curve, episodeThreshold = -0.05) {
+  const pairs = (curve || []).map((p) =>
+    Array.isArray(p) ? [p[0], Number(p[1])] : [p.d, Number(p.v)]
+  );
+  if (!pairs.length) {
+    return {
+      series: [],
+      maxDD: 0,
+      peakDate: null,
+      troughDate: null,
+      recoveryDate: null,
+      underwaterDays: 0,
+      episodes: [],
+    };
+  }
+
+  const series = [];
+  let peak = pairs[0][1];
+  let peakDate = pairs[0][0];
+  let maxDd = 0;
+  let maxPeakDate = peakDate;
+  let maxTroughDate = peakDate;
+  let maxPeakValue = peak;
+
+  const episodes = [];
+  let epActive = false;
+  let epPeakDate = null;
+  let epTroughDate = null;
+  let epTroughDd = 0;
+
+  for (const [d, v] of pairs) {
+    if (v > peak) {
+      peak = v;
+      peakDate = d;
+    }
+    let dd = peak > 0 ? v / peak - 1 : 0;
+    if (dd > 0) dd = 0;
+    series.push({ d, dd });
+
+    if (dd < maxDd) {
+      maxDd = dd;
+      maxPeakDate = peakDate;
+      maxTroughDate = d;
+      maxPeakValue = peak;
+    }
+
+    if (!epActive) {
+      if (dd < 0) {
+        epActive = true;
+        epPeakDate = peakDate;
+        epTroughDate = d;
+        epTroughDd = dd;
+      }
+    } else {
+      if (dd < epTroughDd) {
+        epTroughDd = dd;
+        epTroughDate = d;
+      }
+      if (dd >= 0 || Math.abs(dd) < 1e-15) {
+        if (epTroughDd <= episodeThreshold) {
+          episodes.push({
+            peakDate: epPeakDate,
+            troughDate: epTroughDate,
+            recoveryDate: d,
+            depth: epTroughDd,
+          });
+        }
+        epActive = false;
+        epPeakDate = null;
+        epTroughDate = null;
+        epTroughDd = 0;
+      }
+    }
+  }
+
+  if (epActive && epTroughDd <= episodeThreshold) {
+    episodes.push({
+      peakDate: epPeakDate,
+      troughDate: epTroughDate,
+      recoveryDate: null,
+      depth: epTroughDd,
+    });
+  }
+
+  let recoveryDate = null;
+  if (maxDd < 0 && maxPeakValue > 0) {
+    let pastTrough = false;
+    for (const [d, v] of pairs) {
+      if (d === maxTroughDate) {
+        pastTrough = true;
+        continue;
+      }
+      if (pastTrough && v >= maxPeakValue) {
+        recoveryDate = d;
+        break;
+      }
+    }
+  }
+
+  const dateIndex = Object.fromEntries(pairs.map(([d], i) => [d, i]));
+  const startI = dateIndex[maxPeakDate] ?? 0;
+  let endI;
+  if (recoveryDate != null) endI = dateIndex[recoveryDate];
+  else endI = maxDd < 0 ? pairs.length - 1 : startI;
+  const underwaterDays = maxDd < 0 ? Math.max(0, endI - startI) : 0;
+
+  return {
+    series,
+    maxDD: maxDd,
+    peakDate: maxDd < 0 ? maxPeakDate : pairs[0][0],
+    troughDate: maxDd < 0 ? maxTroughDate : pairs[0][0],
+    recoveryDate,
+    underwaterDays,
+    episodes,
+  };
+}
+
+/** Mirror agents/build_backtest.rolling_cagr — numbers only. */
+function rollingCagr(curve, window = 756) {
+  const pairs = (curve || []).map((p) =>
+    Array.isArray(p) ? [p[0], Number(p[1])] : [p.d, Number(p.v)]
+  );
+  const n = pairs.length;
+  if (window <= 0 || n <= window) {
+    return { series: [], min: null, median: null, max: null, window };
+  }
+  const series = [];
+  const cagrs = [];
+  const exp = 252 / window;
+  for (let t = window; t < n; t++) {
+    const v0 = pairs[t - window][1];
+    const v1 = pairs[t][1];
+    if (v0 <= 0 || v1 <= 0) continue;
+    const cagr = Math.pow(v1 / v0, exp) - 1;
+    series.push({ d: pairs[t][0], cagr });
+    cagrs.push(cagr);
+  }
+  if (!cagrs.length) {
+    return { series: [], min: null, median: null, max: null, window };
+  }
+  const sorted = [...cagrs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median =
+    sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  return {
+    series,
+    min: sorted[0],
+    median,
+    max: sorted[sorted.length - 1],
+    window,
+  };
+}
+
+function destroyExtraCharts() {
+  if (state.ddChart) {
+    state.ddChart.destroy();
+    state.ddChart = null;
+  }
+  if (state.rollingChart) {
+    state.rollingChart.destroy();
+    state.rollingChart = null;
+  }
+}
+
+function renderDrawdownCard(dd, benchDd) {
+  if (!dd) return "";
+  const rec = dd.recoveryDate || "미회복";
+  return `<div class="card pad dd-card"><div class="section-title">수중 낙폭 (Underwater)</div>
+    <div class="dd-stats">
+      <div><div class="label">최대낙폭</div><div class="val neg">${pct(dd.maxDD)}</div></div>
+      <div><div class="label">고점일</div><div class="val">${dd.peakDate || "—"}</div></div>
+      <div><div class="label">저점일</div><div class="val">${dd.troughDate || "—"}</div></div>
+      <div><div class="label">회복일</div><div class="val">${rec}</div></div>
+      <div><div class="label">수중 일수</div><div class="val">${dd.underwaterDays}일</div></div>
+    </div>
+    <div class="dd-chart-wrap"><canvas id="ddCurve"></canvas></div>
+    <div class="warn">고점 대비 낙폭 · 거래일 기준 · 벤치마크는 점선 · 과거 관측값</div>
+  </div>`;
+}
+
+function renderRollingCard() {
+  const keys = Object.keys(ROLLING_WINDOWS);
+  const chips = keys
+    .map(
+      (k) =>
+        `<button type="button" class="chip${state.rollingWindow === k ? " active" : ""}" data-roll="${k}">${k}</button>`
+    )
+    .join("");
+  return `<div class="card pad rolling-card"><div class="section-title">롤링 연환산 수익률</div>
+    <div class="rolling-toolbar">
+      <div class="rolling-chips" id="rollingChips">${chips}</div>
+      <div class="rolling-stats" id="rollingStats"></div>
+    </div>
+    <div class="rolling-chart-wrap"><canvas id="rollingCurve"></canvas></div>
+    <div class="warn" id="rollingNote">창 길이만큼의 거래일이 쌓인 뒤부터 표시 · 과거 관측값</div>
+  </div>`;
+}
+
+function drawDrawdownChart(dd, benchDd) {
+  const ctx = document.getElementById("ddCurve");
+  if (!ctx) return;
+  if (state.ddChart) state.ddChart.destroy();
+  const labels = dd.series.map((p) => p.d);
+  const port = dd.series.map((p) => +(p.dd * 100).toFixed(3));
+  const bmap = Object.fromEntries((benchDd?.series || []).map((p) => [p.d, p.dd]));
+  const ben = dd.series.map((p) => +(((bmap[p.d] ?? 0) * 100).toFixed(3)));
+  state.ddChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "포트폴리오 낙폭",
+          data: port,
+          borderColor: "#ff6b7a",
+          backgroundColor: "rgba(255,107,122,.22)",
+          fill: true,
+          tension: 0.15,
+          pointRadius: 0,
+          borderWidth: 1.6,
+        },
+        {
+          label: "KODEX 200",
+          data: ben,
+          borderColor: "#8b9aab",
+          backgroundColor: "transparent",
+          fill: false,
+          tension: 0.15,
+          pointRadius: 0,
+          borderWidth: 1.2,
+          borderDash: [4, 4],
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { color: "#8b9aab" } } },
+      scales: {
+        x: { ticks: { color: "#667687", maxTicksLimit: 8 }, grid: { color: "rgba(39,49,64,.45)" } },
+        y: {
+          ticks: {
+            color: "#667687",
+            callback: (v) => v + "%",
+          },
+          grid: { color: "rgba(39,49,64,.45)" },
+          max: 0,
+        },
+      },
+    },
+  });
+}
+
+function updateRollingStats(roll) {
+  const host = $("#rollingStats");
+  const note = $("#rollingNote");
+  if (!host) return;
+  if (!roll.series.length) {
+    host.innerHTML = "";
+    if (note)
+      note.textContent =
+        "선택한 창보다 공통 거래일이 짧아 롤링 수익률을 계산할 수 없습니다.";
+    return;
+  }
+  if (note)
+    note.textContent = `창 ${roll.window}거래일 · 관측 ${roll.series.length}개 · 과거 관측값`;
+  host.innerHTML = [
+    ["최소", roll.min],
+    ["중앙", roll.median],
+    ["최대", roll.max],
+  ]
+    .map(
+      ([k, v]) =>
+        `<span class="chip"><span class="k">${k}</span><span class="${cls(v)}">${pct(v)}</span></span>`
+    )
+    .join("");
+}
+
+function drawRollingChart(curve, windowKey) {
+  const ctx = document.getElementById("rollingCurve");
+  if (!ctx) return;
+  const window = ROLLING_WINDOWS[windowKey] || 756;
+  const roll = rollingCagr(curve, window);
+  updateRollingStats(roll);
+  if (state.rollingChart) {
+    state.rollingChart.destroy();
+    state.rollingChart = null;
+  }
+  if (!roll.series.length) return;
+  const labels = roll.series.map((p) => p.d);
+  const data = roll.series.map((p) => +(p.cagr * 100).toFixed(3));
+  state.rollingChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: `롤링 CAGR (${windowKey})`,
+          data,
+          borderColor: "#f0c27a",
+          backgroundColor: "rgba(240,194,122,.12)",
+          fill: true,
+          tension: 0.15,
+          pointRadius: 0,
+          borderWidth: 1.8,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: { legend: { labels: { color: "#8b9aab" } } },
+      scales: {
+        x: { ticks: { color: "#667687", maxTicksLimit: 8 }, grid: { color: "rgba(39,49,64,.45)" } },
+        y: {
+          ticks: {
+            color: "#667687",
+            callback: (v) => v + "%",
+          },
+          grid: { color: "rgba(39,49,64,.45)" },
+        },
+      },
+    },
+  });
+}
+
+function wireRollingChips() {
+  const host = $("#rollingChips");
+  if (!host) return;
+  host.querySelectorAll("[data-roll]").forEach((btn) => {
+    btn.onclick = () => {
+      state.rollingWindow = btn.getAttribute("data-roll");
+      host.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
+      btn.classList.add("active");
+      if (state.lastPortCurve) drawRollingChart(state.lastPortCurve, state.rollingWindow);
+    };
+  });
+}
+
+
 function renderResult(r, bench, picks, corr, tax) {
   const host = $("#result");
   if (r.error) {
+    destroyExtraCharts();
+    if (state.chart) { state.chart.destroy(); state.chart = null; }
     host.innerHTML = `<div class="card pad empty">${r.error}</div>`;
     return;
   }
@@ -717,7 +1070,12 @@ function renderResult(r, bench, picks, corr, tax) {
     ? `<div class="warn">Total Return 모드 · 분배율 모델값으로 일별 합성 가격 사용 · 실제 분배금과 다를 수 있음</div>`
     : "";
   const retLabel = state.totalReturn ? "가격+분배(모형)" : "가격수익률(분배금 미포함)";
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${Object.keys({ ...r.yearly, ...(bench.yearly || {}) })
+  destroyExtraCharts();
+  const dd = computeDrawdown(r.curve);
+  const benchDd = bench && bench.curve ? computeDrawdown(bench.curve) : null;
+  state.lastPortCurve = r.curve;
+  state.lastBenchCurve = bench?.curve || null;
+  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${Object.keys({ ...r.yearly, ...(bench.yearly || {}) })
     .sort()
     .map((y) => {
       const a = r.yearly[y],
@@ -726,6 +1084,9 @@ function renderResult(r, bench, picks, corr, tax) {
     })
     .join("")}</tbody></table><div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
+  drawDrawdownChart(dd, benchDd);
+  drawRollingChart(r.curve, state.rollingWindow);
+  wireRollingChips();
   $("#agentText").textContent = reviewAgent(r, bench, picks);
 }
 

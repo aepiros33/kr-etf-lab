@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from build_backtest import backtest, load
+from build_backtest import backtest, load, compute_drawdown, rolling_cagr, ROLLING_WINDOWS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -221,6 +221,64 @@ def main():
     matrix = corr_matrix(corr_codes[:3], prices, start="2019-01-01")
     check_corr_invariants(matrix)
 
+    # --- Drawdown helpers: maxDD matches engine mdd ---
+    dd = compute_drawdown(s.curve)
+    if abs(dd["maxDD"] - s.mdd) > 1e-12:
+        fail(f"drawdown maxDD {dd['maxDD']} != mdd {s.mdd}")
+    if len(dd["series"]) != len(s.curve):
+        fail("drawdown series length mismatch")
+    if any(pt["dd"] > 1e-12 for pt in dd["series"]):
+        fail("drawdown series has positive dd")
+    if dd["underwaterDays"] < 0:
+        fail("underwaterDays negative")
+    if s.mdd < 0 and (not dd["peakDate"] or not dd["troughDate"]):
+        fail("missing peak/trough for non-zero MDD")
+    empty_dd = compute_drawdown([])
+    if empty_dd["series"] or empty_dd["maxDD"] != 0.0:
+        fail("empty curve drawdown should be zero/empty")
+
+    # Synthetic V-shape: peak→trough→recovery
+    vcurve = [
+        ("d0", 100.0),
+        ("d1", 90.0),
+        ("d2", 80.0),
+        ("d3", 90.0),
+        ("d4", 100.0),
+        ("d5", 110.0),
+    ]
+    vdd = compute_drawdown(vcurve, episode_threshold=-0.05)
+    if abs(vdd["maxDD"] - (-0.2)) > 1e-12:
+        fail(f"V-shape maxDD {vdd['maxDD']}")
+    if vdd["peakDate"] != "d0" or vdd["troughDate"] != "d2" or vdd["recoveryDate"] != "d4":
+        fail(f"V-shape dates {vdd['peakDate']} {vdd['troughDate']} {vdd['recoveryDate']}")
+    if vdd["underwaterDays"] != 4:
+        fail(f"V-shape underwaterDays {vdd['underwaterDays']}")
+    if len(vdd["episodes"]) != 1 or vdd["episodes"][0]["recoveryDate"] != "d4":
+        fail("V-shape episode mismatch")
+
+    # --- Rolling CAGR ---
+    short = rolling_cagr(s.curve, window=10_000)
+    if short["series"] or short["min"] is not None:
+        fail("rolling should be empty when window >= curve length")
+    roll = rolling_cagr(s.curve, window=ROLLING_WINDOWS["1y"])
+    if len(s.curve) > ROLLING_WINDOWS["1y"] + 1 and not roll["series"]:
+        fail("1y rolling series unexpectedly empty")
+    if roll["series"]:
+        if not (roll["min"] <= roll["median"] <= roll["max"]):
+            fail(f"rolling min/median/max order {roll['min']} {roll['median']} {roll['max']}")
+        # Spot-check first point formula
+        pairs = [(p[0], float(p[1])) if not isinstance(p, dict) else (p["d"], float(p["v"])) for p in s.curve]
+        w = ROLLING_WINDOWS["1y"]
+        t = w
+        v0, v1 = pairs[t - w][1], pairs[t][1]
+        expect = (v1 / v0) ** (252.0 / w) - 1.0
+        got = roll["series"][0]["cagr"]
+        if abs(got - expect) > 1e-12:
+            fail(f"rolling formula mismatch {got} vs {expect}")
+    tiny = rolling_cagr(vcurve, window=2)
+    if len(tiny["series"]) != 4:
+        fail(f"tiny rolling len {len(tiny['series'])}")
+
     print("PASS")
     print(
         f"etfs={len(etfs)} prices={len(prices)} "
@@ -228,7 +286,9 @@ def main():
         f"mixed_cagr={mixed_q.cagr:.2%} "
         f"dca_cagr={dca.cagr:.2%} lump_cagr={lump.cagr:.2%} "
         f"dca_invested={dca.total_invested:.0f} "
-        f"presets={len(PRESETS)} corr_n={len(corr_codes[:3])}"
+        f"presets={len(PRESETS)} corr_n={len(corr_codes[:3])} "
+        f"dd_max={dd['maxDD']:.2%} uw={dd['underwaterDays']} "
+        f"roll1y_n={len(roll['series'])}"
     )
 
 
