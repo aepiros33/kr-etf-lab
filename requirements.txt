@@ -1,0 +1,9 @@
+finance-datareader>=0.9.202
+pandas>=2.2
+lxml
+beautifulsoup4
+html5lib
+requests
+plotly
+tabulate
+requests-file
