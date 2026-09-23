@@ -28,7 +28,7 @@ PRICES_DIR = DATA / "prices"
 BUNDLE_OUT = DATA / "etf_prices.json"
 BENCH = "069500"
 TOP_N = 80
-START = "2015-01-01"  # enable ≥10y backtests (need ≤2016-09-23)
+START = "2015-01-01"  # FDR default; for pre-2015 use agents/yf_backfill.py --start 2007-01-01
 
 # Curated names/blurbs for well-known tickers (optional overrides).
 CURATED = {
@@ -48,6 +48,10 @@ CURATED = {
     "319640": ("TIGER 골드선물(H)", "원자재", "미래에셋", "금 선물·환헤지(H)", False),
     "148070": ("KIWOOM 국고채10년", "채권", "키움", "중장기 국채", False),
     "114260": ("KODEX 국고채3년", "채권", "삼성자산운용", "단기 국채", False),
+    "153130": ("KODEX 단기채권", "현금성", "삼성자산운용", "단기 채권", False),
+    "214980": ("KODEX 단기채권PLUS", "현금성", "삼성자산운용", "단기 채권 PLUS", False),
+    "130730": ("KIWOOM 단기자금", "현금성", "키움", "단기 자금", False),
+    "114800": ("KODEX 인버스", "테마", "삼성자산운용", "코스피200 인버스", True),
     "357870": ("TIGER CD금리투자KIS(합성)", "현금성", "미래에셋", "단기 금리", False),
     "459580": ("KODEX CD금리액티브(합성)", "현금성", "삼성자산운용", "단기 금리", False),
 }
@@ -186,6 +190,12 @@ def main():
         action="store_true",
         help="merge fetched prices/meta into existing etf_prices.json + price files "
         "(do not wipe other tickers)",
+    )
+    parser.add_argument(
+        "--yf-backfill",
+        action="store_true",
+        help="after FDR fetch, run agents/yf_backfill.py to prepend Yahoo History "
+        "(see that script; use --start 2007-01-01 for longest real ETF closes)",
     )
     args = parser.parse_args()
 
@@ -326,6 +336,20 @@ def main():
               "bytes", BUNDLE_OUT.stat().st_size)
     print("saved", META_OUT, "etfs", len(meta_payload["etfs"]),
           "price_files", len(list(PRICES_DIR.glob('*.json'))))
+
+    if getattr(args, "yf_backfill", False):
+        # Optional Yahoo prepend for longest real ETF history.
+        import subprocess
+        import sys
+        yf_script = ROOT / "agents" / "yf_backfill.py"
+        cmd = [
+            sys.executable,
+            str(yf_script),
+            "--start",
+            "2007-01-01",
+        ]
+        print("running", " ".join(cmd))
+        subprocess.check_call(cmd, cwd=str(ROOT))
 
 
 if __name__ == "__main__":

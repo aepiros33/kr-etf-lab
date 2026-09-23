@@ -8,7 +8,7 @@ const PRESETS = {
       "148070": 17.5,
       "114260": 15,
       "132030": 15,
-      "214980": 20,
+      "153130": 20,
     },
   },
   permanent: {
@@ -19,7 +19,7 @@ const PRESETS = {
       "148070": 12.5,
       "114260": 12.5,
       "132030": 25,
-      "214980": 25,
+      "153130": 25,
     },
   },
   global6040: {
@@ -36,7 +36,7 @@ const PRESETS = {
       "133690": 30,
       "069500": 20,
       "148070": 30,
-      "214980": 20,
+      "153130": 20,
     },
   },
   goldenButterfly: {
@@ -45,7 +45,7 @@ const PRESETS = {
       "069500": 20,
       "133690": 20,
       "148070": 20,
-      "214980": 20,
+      "153130": 20,
       "132030": 20,
     },
   },
@@ -63,7 +63,7 @@ const PRESETS = {
       "069500": 35,
       "133690": 30,
       "148070": 20,
-      "214980": 15,
+      "153130": 15,
     },
   },
   divGrowth: {
@@ -72,7 +72,7 @@ const PRESETS = {
       "069500": 50,
       "133690": 20,
       "148070": 15,
-      "214980": 15,
+      "153130": 15,
     },
   },
   semiDefensive: {
@@ -81,7 +81,7 @@ const PRESETS = {
       "069500": 40,
       "148070": 25,
       "132030": 20,
-      "214980": 15,
+      "153130": 15,
     },
   },
 };
@@ -119,10 +119,10 @@ const state = {
   volWindow: 60,
   maOverlay: false,
   maWindow: 200,
-  cashCode: "214980",
+  cashCode: "153130",
   maCashPct: 1.0,
   regimeHedge: false,
-  regimeHedgeMode: "inverse", // inverse (−1x 114800) | cash (214980/423160)
+  regimeHedgeMode: "inverse", // inverse (−1x 114800) | cash (153130/423160)
   regimeHedgePct: 0.15, // hard cap ≤15%
   regimeHedgeCode: "114800",
   goldOn: false,
@@ -677,11 +677,11 @@ async function run() {
   const needHedge = !!state.regimeHedge;
   const needGold = !!state.goldOn;
   const extra = [BENCH];
-  if (needCash) extra.push(state.cashCode || "214980");
+  if (needCash) extra.push(state.cashCode || "153130");
   if (needHedge) {
     extra.push(REGIME_HEDGE_B);
     if (state.regimeHedgeMode === "inverse") extra.push(state.regimeHedgeCode || "114800");
-    else extra.push(state.cashCode || "214980");
+    else extra.push(state.cashCode || "153130");
   }
   if (needGold) {
     extra.push(resolveGoldCode(state.goldCode), GOLD_CASH);
@@ -693,7 +693,7 @@ async function run() {
       return;
     }
   }
-  if (needCash && !state.prices[state.cashCode || "214980"]) {
+  if (needCash && !state.prices[state.cashCode || "153130"]) {
     $("#result").innerHTML = `<div class="card pad empty">안전자산 ${state.cashCode} 시세가 없습니다.</div>`;
     return;
   }
@@ -704,7 +704,7 @@ async function run() {
     }
     const hCode =
       state.regimeHedgeMode === "cash"
-        ? state.cashCode || "214980"
+        ? state.cashCode || "153130"
         : state.regimeHedgeCode || "114800";
     if (hCode === "252670") {
       $("#result").innerHTML = `<div class="card pad empty">2X 인버스는 국면 헤지(실험)에서 금지입니다 (−1x 114800만 허용).</div>`;
@@ -738,7 +738,7 @@ async function run() {
       ? [
           REGIME_HEDGE_B,
           state.regimeHedgeMode === "cash"
-            ? state.cashCode || "214980"
+            ? state.cashCode || "153130"
             : state.regimeHedgeCode || "114800",
         ]
       : [];
@@ -746,7 +746,7 @@ async function run() {
     ...new Set([
       ...codes,
       BENCH,
-      ...(needCash ? [state.cashCode || "214980"] : []),
+      ...(needCash ? [state.cashCode || "153130"] : []),
       ...hedgeLoad,
       ...(needGold ? [resolveGoldCode(state.goldCode), GOLD_CASH] : []),
     ]),
@@ -774,7 +774,7 @@ async function run() {
       volWindow: state.volWindow,
       maOverlay: state.maOverlay,
       maWindow: state.maWindow,
-      cashCode: state.cashCode || "214980",
+      cashCode: state.cashCode || "153130",
       maCashPct: state.maCashPct,
       regimeHedge: state.regimeHedge,
       regimeHedgeMode: state.regimeHedgeMode,
@@ -1013,7 +1013,7 @@ function applyRegimeHedge(tw, hedgeOn, hedgeCode, hedgePct) {
 }
 
 function resolveRegimeHedgeCode(mode, cashCode, hedgeCode) {
-  if ((mode || "inverse") === "cash") return cashCode || "214980";
+  if ((mode || "inverse") === "cash") return cashCode || "153130";
   const code = hedgeCode || REGIME_HEDGE_INV;
   if (REGIME_HEDGE_FORBIDDEN_2X.has(code)) {
     throw new Error(`2X 인버스 ${code} 금지 (−1x ${REGIME_HEDGE_INV}만)`);
@@ -1029,7 +1029,7 @@ function resolveRegimeHedgeCode(mode, cashCode, hedgeCode) {
 // Overlay order: base → invVol → maOverlay → regime → gold last (G1).
 const GOLD_CODE = "411060";
 const GOLD_CODE_FUTURES = "132030"; // long KRX gold futures (H)
-const GOLD_CASH = "214980"; // fixed; NEVER 0072R0
+const GOLD_CASH = "153130"; // fixed; NEVER 0072R0
 const GOLD_COST = 0.001;
 const GOLD_SLEEVE_DEFAULT = 0.15;
 const GOLD_CODES_ALLOWED = ["411060", "132030", "139320", "319640"];
@@ -1103,7 +1103,7 @@ function backtest(
   const volWindow = Math.max(2, Number(opts.volWindow) || 60);
   const maOverlay = !!opts.maOverlay;
   const maWindow = Math.max(2, Number(opts.maWindow) || 200);
-  const cashCode = opts.cashCode || "214980";
+  const cashCode = opts.cashCode || "153130";
   const maCashPct = opts.maCashPct != null ? Number(opts.maCashPct) : 1.0;
   const regimeHedge = !!opts.regimeHedge;
   const regimeHedgeMode = opts.regimeHedgeMode === "cash" ? "cash" : "inverse";
@@ -1836,7 +1836,7 @@ function renderResult(r, bench, picks, corr, tax) {
       : "";
   const goldNote =
     r.goldLog
-      ? `<div class="warn">금 온/오프 슬리브 · 최근: <strong>${r.goldActive ? "ON" : "OFF"}</strong> · 보유 ${r.goldHolding || "—"} · 슬리브 ${(clampGoldSleeve(state.goldSleevePct) * 100).toFixed(0)}% · 룩백 ${state.goldLookback}개월 · 신호 ${resolveGoldCode(state.goldCode)} vs 214980 · 과거 시뮬 · 투자 권유 아님</div>`
+      ? `<div class="warn">금 온/오프 슬리브 · 최근: <strong>${r.goldActive ? "ON" : "OFF"}</strong> · 보유 ${r.goldHolding || "—"} · 슬리브 ${(clampGoldSleeve(state.goldSleevePct) * 100).toFixed(0)}% · 룩백 ${state.goldLookback}개월 · 신호 ${resolveGoldCode(state.goldCode)} vs 153130 · 과거 시뮬 · 투자 권유 아님</div>`
       : "";
   const weightNote =
     state.weighting === "invVol"
@@ -2055,7 +2055,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const cashEl = $("#cashCode");
   if (cashEl)
     cashEl.onchange = (e) => {
-      state.cashCode = e.target.value || "214980";
+      state.cashCode = e.target.value || "153130";
     };
   syncStratControls();
   $("#etfSearch").oninput = (e) => {

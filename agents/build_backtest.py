@@ -379,7 +379,7 @@ def _apply_regime_hedge(
 def _resolve_regime_hedge_code(mode: str, cash_code: str, hedge_code: str | None) -> str:
     mode = (mode or "inverse").lower()
     if mode == "cash":
-        return cash_code or "214980"
+        return cash_code or "153130"
     code = hedge_code or REGIME_HEDGE_INV_CODE
     if code in REGIME_HEDGE_FORBIDDEN_2X:
         raise ValueError(f"2X 인버스 {code} 는 국면 헤지(실험)에서 금지입니다 (−1x {REGIME_HEDGE_INV_CODE}만 허용)")
@@ -390,12 +390,12 @@ def _resolve_regime_hedge_code(mode: str, cash_code: str, hedge_code: str | None
 
 
 # --- GOLDON (금 온/오프 슬리브): absolute momentum overlay, not a rebalance mode ---
-# Signal gold_code vs cash proxy 214980 (fixed). Carve sleevePct; renormalize rest.
+# Signal gold_code vs cash proxy 153130 (fixed). Carve sleevePct; renormalize rest.
 # Default gold_code=411060 (spot). Long-history proxy: 132030 KODEX 골드선물(H).
 # Overlay order: base → invVol → maOverlay → regime hedge → gold sleeve last (G1).
 GOLD_CODE = "411060"
 GOLD_CODE_FUTURES = "132030"  # long KRX gold futures (H); not a silent default swap
-GOLD_CASH = "214980"  # NEVER 0072R0 in this signature
+GOLD_CASH = "153130"  # NEVER 0072R0 in this signature
 GOLD_COST = 0.001
 GOLD_SLEEVE_DEFAULT = 0.15
 GOLD_SLEEVE_MIN = 0.10
@@ -435,7 +435,7 @@ def _apply_gold_sleeve(
     sleeve_pct: float,
     gold_code: str = GOLD_CODE,
 ) -> dict[str, float]:
-    """ON → sleeve in gold_code; OFF → sleeve in 214980. Strip gold_code from rest (G1)."""
+    """ON → sleeve in gold_code; OFF → sleeve in 153130. Strip gold_code from rest (G1)."""
     sleeve = _clamp_gold_sleeve(sleeve_pct)
     rest_scale = 1.0 - sleeve
     rest: dict[str, float] = {}
@@ -475,7 +475,7 @@ def backtest(
     vol_window: int = 60,
     ma_overlay: bool = False,
     ma_window: int = 200,
-    cash_code: str = "214980",
+    cash_code: str = "153130",
     ma_cash_pct: float = 1.0,
     regime_hedge: bool = False,
     regime_hedge_mode: str = "inverse",
