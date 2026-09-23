@@ -529,6 +529,94 @@ def main():
             if v <= 0:
                 fail(f"MA overlay non-positive value on {d}")
 
+    # --- 국면 헤지(실험): dual-MA → −1x 114800 cap 15% / cash alt; 2X forbidden ---
+    from build_backtest import (
+        _regime_hedge_signal,
+        _apply_regime_hedge,
+        _resolve_regime_hedge_code,
+        REGIME_HEDGE_MAX_PCT,
+        REGIME_HEDGE_INV_CODE,
+    )
+    try:
+        _resolve_regime_hedge_code("inverse", "214980", "252670")
+        fail("2X 252670 should be rejected for regime hedge")
+    except ValueError:
+        pass
+    try:
+        _resolve_regime_hedge_code("inverse", "214980", "122630")
+        fail("non-114800 inverse should be rejected")
+    except ValueError:
+        pass
+    if _resolve_regime_hedge_code("inverse", "214980", None) != REGIME_HEDGE_INV_CODE:
+        fail("default inverse hedge code must be 114800")
+    if _resolve_regime_hedge_code("cash", "423160", None) != "423160":
+        fail("cash mode should use cash_code")
+
+    # Cap hard-coded at 15%
+    capped = _apply_regime_hedge({"069500": 1.0}, True, "114800", 0.50)
+    if abs(capped.get("114800", 0) - REGIME_HEDGE_MAX_PCT) > 1e-9:
+        fail(f"regime hedge cap must be {REGIME_HEDGE_MAX_PCT}: {capped}")
+    if abs(capped.get("069500", 0) - (1 - REGIME_HEDGE_MAX_PCT)) > 1e-9:
+        fail(f"risk sleeve scale wrong: {capped}")
+    clear = _apply_regime_hedge({"069500": 1.0}, False, "114800", 0.15)
+    if list(clear.keys()) != ["069500"] or abs(clear["069500"] - 1.0) > 1e-12:
+        fail(f"hedge_off should leave weights unchanged: {clear}")
+
+    if "069500" in prices and "360750" in prices and "114800" in prices:
+        # Look-ahead: signal uses dates < asof only (via _ma_risk_on)
+        probe = next(d for d in sorted(prices["069500"]) if d >= "2022-01-01")
+        _ = _regime_hedge_signal(prices, probe, 200)
+        rh = backtest(
+            {"069500": 0.6, "360750": 0.4},
+            prices,
+            start="2021-01-01",
+            rebalance="Q",
+            regime_hedge=True,
+            regime_hedge_mode="inverse",
+            regime_hedge_pct=0.15,
+            ma_window=200,
+        )
+        if rh.hedge_log is None or len(rh.hedge_log) < 2:
+            fail("regime hedge missing hedge_log")
+        if rh.hedge_active is None:
+            fail("regime hedge missing hedge_active")
+        # Monthly rebalance forced: more target updates than pure Q if hedge months differ
+        bh = backtest(
+            {"069500": 0.6, "360750": 0.4},
+            prices,
+            start="2021-01-01",
+            rebalance="Q",
+        )
+        if any(e.get("hedge") for e in rh.hedge_log):
+            if abs(rh.total_return - bh.total_return) < 1e-12:
+                fail("active regime hedge should change path vs no-hedge")
+        for i in range(1, min(len(rh.curve), 400)):
+            pt = rh.curve[i]
+            d, v = (pt["d"], pt["v"]) if isinstance(pt, dict) else (pt[0], pt[1])
+            if v <= 0:
+                fail(f"regime hedge non-positive value on {d}")
+
+        # Cash alternative mode
+        if "214980" in prices:
+            rh_cash = backtest(
+                {"069500": 1.0},
+                prices,
+                start="2021-01-01",
+                rebalance="M",
+                regime_hedge=True,
+                regime_hedge_mode="cash",
+                regime_hedge_pct=0.15,
+                cash_code="214980",
+                ma_window=200,
+            )
+            if not rh_cash.hedge_log:
+                fail("cash-mode regime hedge missing hedge_log")
+
+    # Presets must never include inverse/leverage 114800 / 252670
+    for name, w in PRESETS.items():
+        if "114800" in w or "252670" in w:
+            fail(f"preset {name} must not include inverse hedge codes")
+
     # --- Existing MOM / yearly / presets still covered above ---
 
 
