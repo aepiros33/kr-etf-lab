@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=goldon3" />
+  <link rel="stylesheet" href="./styles.css?v=proxy10y" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -22,6 +22,7 @@
       <aside class="card pad sidebar">
         <div class="section-title">프리셋</div>
         <div class="presets" id="presets"></div>
+        <p class="muted-note" id="presetProxyNote">프리셋은 10년 시세 프록시(나스닥100·국고채·금선물·단기채PLUS). 과거 시뮬 · 투자 자문 아님.</p>
         <div class="row">
           <select id="period">
             <option value="1y">1년</option>
@@ -103,7 +104,7 @@
             </select>
           </label>
         </div>
-        <p class="muted-note">실험: 069500·360750 둘 다 MA↓일 때만 헤지 슬리브(≤15%, 월1회). 2X 인버스 금지. 기본 프리셋 미포함. 투자 자문 아님.</p>
+        <p class="muted-note">실험: 069500·133690 둘 다 MA↓일 때만 헤지 슬리브(≤15%, 월1회). 2X 인버스 금지. 기본 프리셋 미포함. 투자 자문 아님.</p>
         <label class="toggle">
           <input type="checkbox" id="goldOn" />
           <span>금 온/오프 슬리브</span>
@@ -132,8 +133,8 @@
           </label>
           <label class="field">금 종목
             <select id="goldCode">
-              <option value="411060" selected>금현물 411060</option>
-              <option value="132030">금선물 132030 (장기)</option>
+              <option value="411060">금현물 411060</option>
+              <option value="132030" selected>금선물 132030 (장기)</option>
             </select>
           </label>
         </div>
@@ -208,9 +209,9 @@
       Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
-      금 슬리브 기본은 ACE KRX금현물(411060). 장기 시뮬용으로 KODEX 골드선물(H)(132030) 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형).
+      프리셋은 10년 시세 프록시(나스닥100·국고채·금선물·단기채PLUS)를 사용합니다. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형).
     </p>
   </div>
-  <script src="./app.js?v=goldon4"></script>
+  <script src="./app.js?v=proxy10y"></script>
 </body>
 </html>

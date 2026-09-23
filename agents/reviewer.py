@@ -14,64 +14,59 @@ ROOT = Path(__file__).resolve().parents[1]
 PRESETS = {
     "kAllWeather": {
         "069500": 15,
-        "360750": 17.5,
-        "453850": 17.5,
-        "148070": 15,
-        "411060": 15,
-        "423160": 20,
+        "133690": 17.5,
+        "148070": 17.5,
+        "114260": 15,
+        "132030": 15,
+        "214980": 20,
     },
     "permanent": {
         "069500": 12.5,
-        "360750": 12.5,
+        "133690": 12.5,
         "148070": 12.5,
-        "453850": 12.5,
-        "411060": 25,
-        "423160": 25,
+        "114260": 12.5,
+        "132030": 25,
+        "214980": 25,
     },
     "global6040": {
-        "360750": 40,
+        "133690": 40,
         "069500": 20,
-        "453850": 20,
-        "148070": 20,
+        "148070": 40,
     },
     "monthlyIncome": {
-        "458730": 40,
-        "329200": 20,
+        "133690": 30,
+        "069500": 20,
+        "148070": 30,
         "214980": 20,
-        "441640": 20,
     },
     "goldenButterfly": {
         "069500": 20,
-        "229200": 20,
+        "133690": 20,
         "148070": 20,
         "214980": 20,
-        "411060": 20,
+        "132030": 20,
     },
     "growth80": {
-        "133690": 35,
-        "360750": 25,
+        "133690": 60,
         "069500": 20,
         "148070": 20,
     },
     "koreaUs": {
-        "069500": 25,
-        "229200": 10,
-        "360750": 30,
+        "069500": 35,
+        "133690": 30,
         "148070": 20,
         "214980": 15,
     },
     "divGrowth": {
-        "161510": 35,
-        "069500": 15,
-        "360750": 20,
+        "069500": 50,
+        "133690": 20,
         "148070": 15,
         "214980": 15,
     },
     "semiDefensive": {
-        "091160": 25,
-        "069500": 15,
+        "069500": 40,
         "148070": 25,
-        "411060": 20,
+        "132030": 20,
         "214980": 15,
     },
 }
@@ -250,7 +245,7 @@ def main():
             fail(f"preset {name} missing from meta: {missing}")
 
     # --- Feature 5: correlation invariants on 2–3 tickers ---
-    corr_codes = [c for c in ("069500", "148070", "360750") if c in prices]
+    corr_codes = [c for c in ("069500", "148070", "133690") if c in prices]
     if len(corr_codes) < 2:
         fail("need >=2 tickers for corr invariants")
     matrix = corr_matrix(corr_codes[:3], prices, start="2019-01-01")
@@ -419,7 +414,7 @@ def main():
             fail(f"MOM single holdings unexpected: {h}")
 
     # --- Momentum multi: holdings present + no look-ahead (signal uses prior month) ---
-    mom_uni = {c: 1.0 for c in ("069500", "360750", "148070", "411060") if c in prices}
+    mom_uni = {c: 1.0 for c in ("069500", "133690", "148070", "132030") if c in prices}
     if len(mom_uni) >= 3:
         mom_m = backtest(
             mom_uni, prices, start="2020-01-01",
@@ -562,12 +557,12 @@ def main():
     if list(clear.keys()) != ["069500"] or abs(clear["069500"] - 1.0) > 1e-12:
         fail(f"hedge_off should leave weights unchanged: {clear}")
 
-    if "069500" in prices and "360750" in prices and "114800" in prices:
+    if "069500" in prices and "133690" in prices and "114800" in prices:
         # Look-ahead: signal uses dates < asof only (via _ma_risk_on)
         probe = next(d for d in sorted(prices["069500"]) if d >= "2022-01-01")
         _ = _regime_hedge_signal(prices, probe, 200)
         rh = backtest(
-            {"069500": 0.6, "360750": 0.4},
+            {"069500": 0.6, "133690": 0.4},
             prices,
             start="2021-01-01",
             rebalance="Q",
@@ -582,7 +577,7 @@ def main():
             fail("regime hedge missing hedge_active")
         # Monthly rebalance forced: more target updates than pure Q if hedge months differ
         bh = backtest(
-            {"069500": 0.6, "360750": 0.4},
+            {"069500": 0.6, "133690": 0.4},
             prices,
             start="2021-01-01",
             rebalance="Q",

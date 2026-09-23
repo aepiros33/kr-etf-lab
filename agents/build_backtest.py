@@ -324,11 +324,11 @@ def _apply_ma_overlay(
 
 
 # --- 국면 헤지(실험): see docs/EXPERIMENT_REGIME_HEDGE.md ---
-# Dual-MA signal (069500 ∧ 360750 below SMA) → optional −1x 114800 or cash sleeve ≤15%.
+# Dual-MA signal (069500 ∧ 133690 below SMA) → optional −1x 114800 or cash sleeve ≤15%.
 # NOT a default strategy. 2X inverse forbidden. No look-ahead (SMA uses dates < asof).
 BENCH_CODE = "069500"
 REGIME_HEDGE_SIGNAL_A = "069500"
-REGIME_HEDGE_SIGNAL_B = "360750"
+REGIME_HEDGE_SIGNAL_B = "133690"
 REGIME_HEDGE_INV_CODE = "114800"  # −1x only
 REGIME_HEDGE_FORBIDDEN_2X = frozenset({"252670"})  # KODEX 200선물인버스2X 등
 REGIME_HEDGE_MAX_PCT = 0.15
@@ -985,7 +985,7 @@ def rolling_cagr(curve, window: int = 756):
 
 def main():
     raw, prices = load()
-    sample = {"069500": 0.4, "360750": 0.3, "148070": 0.2, "411060": 0.1}
+    sample = {"069500": 0.4, "133690": 0.3, "148070": 0.2, "132030": 0.1}
     available = {k: v for k, v in sample.items() if k in prices}
     s = backtest(available, prices, start="2022-01-01")
     dca = backtest(

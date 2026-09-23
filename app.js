@@ -4,57 +4,55 @@ const PRESETS = {
     label: "🛡️ K-올웨더",
     w: {
       "069500": 15,
-      "360750": 17.5,
-      "453850": 17.5,
-      "148070": 15,
-      "411060": 15,
-      "423160": 20,
+      "133690": 17.5,
+      "148070": 17.5,
+      "114260": 15,
+      "132030": 15,
+      "214980": 20,
     },
   },
   permanent: {
     label: "🏛️ 영구 포트폴리오",
     w: {
       "069500": 12.5,
-      "360750": 12.5,
+      "133690": 12.5,
       "148070": 12.5,
-      "453850": 12.5,
-      "411060": 25,
-      "423160": 25,
+      "114260": 12.5,
+      "132030": 25,
+      "214980": 25,
     },
   },
   global6040: {
     label: "📈 글로벌 60/40",
     w: {
-      "360750": 40,
+      "133690": 40,
       "069500": 20,
-      "453850": 20,
-      "148070": 20,
+      "148070": 40,
     },
   },
   monthlyIncome: {
     label: "💵 월배당 인컴형",
     w: {
-      "458730": 40,
-      "329200": 20,
+      "133690": 30,
+      "069500": 20,
+      "148070": 30,
       "214980": 20,
-      "441640": 20,
     },
   },
   goldenButterfly: {
     label: "🦋 골든버터플라이",
     w: {
       "069500": 20,
-      "229200": 20,
+      "133690": 20,
       "148070": 20,
       "214980": 20,
-      "411060": 20,
+      "132030": 20,
     },
   },
   growth80: {
     label: "🚀 성장 80/20",
     w: {
-      "133690": 35,
-      "360750": 25,
+      "133690": 60,
       "069500": 20,
       "148070": 20,
     },
@@ -62,9 +60,8 @@ const PRESETS = {
   koreaUs: {
     label: "🇰🇷🇺🇸 한미 분산",
     w: {
-      "069500": 25,
-      "229200": 10,
-      "360750": 30,
+      "069500": 35,
+      "133690": 30,
       "148070": 20,
       "214980": 15,
     },
@@ -72,9 +69,8 @@ const PRESETS = {
   divGrowth: {
     label: "📈 배당성장",
     w: {
-      "161510": 35,
-      "069500": 15,
-      "360750": 20,
+      "069500": 50,
+      "133690": 20,
       "148070": 15,
       "214980": 15,
     },
@@ -82,10 +78,9 @@ const PRESETS = {
   semiDefensive: {
     label: "🛡️ 반도체+방어",
     w: {
-      "091160": 25,
-      "069500": 15,
+      "069500": 40,
       "148070": 25,
-      "411060": 20,
+      "132030": 20,
       "214980": 15,
     },
   },
@@ -133,7 +128,7 @@ const state = {
   goldOn: false,
   goldSleevePct: 0.15, // UI 10–20%
   goldLookback: 1, // 1|3
-  goldCode: "411060", // 411060 spot | 132030 futures long
+  goldCode: "132030", // 411060 spot | 132030 futures long (default long for 10y)
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -684,7 +679,7 @@ async function run() {
   const extra = [BENCH];
   if (needCash) extra.push(state.cashCode || "214980");
   if (needHedge) {
-    extra.push("360750");
+    extra.push(REGIME_HEDGE_B);
     if (state.regimeHedgeMode === "inverse") extra.push(state.regimeHedgeCode || "114800");
     else extra.push(state.cashCode || "214980");
   }
@@ -703,8 +698,8 @@ async function run() {
     return;
   }
   if (needHedge) {
-    if (!state.prices["360750"]) {
-      $("#result").innerHTML = `<div class="card pad empty">국면 헤지 신호용 360750 시세가 없습니다.</div>`;
+    if (!state.prices[REGIME_HEDGE_B]) {
+      $("#result").innerHTML = `<div class="card pad empty">국면 헤지 신호용 ${REGIME_HEDGE_B} 시세가 없습니다.</div>`;
       return;
     }
     const hCode =
@@ -741,7 +736,7 @@ async function run() {
   const hedgeLoad =
     needHedge
       ? [
-          "360750",
+          REGIME_HEDGE_B,
           state.regimeHedgeMode === "cash"
             ? state.cashCode || "214980"
             : state.regimeHedgeCode || "114800",
@@ -991,7 +986,7 @@ const REGIME_HEDGE_MAX_PCT = 0.15;
 const REGIME_HEDGE_INV = "114800";
 const REGIME_HEDGE_FORBIDDEN_2X = new Set(["252670"]);
 const REGIME_HEDGE_A = "069500";
-const REGIME_HEDGE_B = "360750";
+const REGIME_HEDGE_B = "133690";
 
 function regimeHedgeSignal(priceMap, asof, window = 200) {
   if (!priceMap[REGIME_HEDGE_A] || !priceMap[REGIME_HEDGE_B]) return false;
@@ -1143,7 +1138,7 @@ function backtest(
   }
   if (regimeHedge) {
     if (!priceMap[REGIME_HEDGE_A] || !priceMap[REGIME_HEDGE_B]) {
-      return { error: "국면 헤지 신호용 069500·360750 시세가 필요합니다." };
+      return { error: "국면 헤지 신호용 069500·133690 시세가 필요합니다." };
     }
     if (!priceMap[hedgeCodeRes]) {
       return { error: `국면 헤지 자산 ${hedgeCodeRes} 시세가 없습니다.` };
@@ -1837,7 +1832,7 @@ function renderResult(r, bench, picks, corr, tax) {
     : "";
   const hedgeNote =
     r.hedgeLog
-      ? `<div class="warn">국면 헤지(실험) · 최근: <strong>${r.hedgeActive ? "헤지 소비중" : "헤지 없음"}</strong> · 신호 069500∧360750 MA↓ · 모드 ${state.regimeHedgeMode === "cash" ? "현금/단기채" : "−1x 114800"} · 상한 ${(Math.min(0.15, state.regimeHedgePct) * 100).toFixed(0)}% · 월1회 · 2X 금지 · 실험·자문 아님</div>`
+      ? `<div class="warn">국면 헤지(실험) · 최근: <strong>${r.hedgeActive ? "헤지 소비중" : "헤지 없음"}</strong> · 신호 069500∧133690 MA↓ · 모드 ${state.regimeHedgeMode === "cash" ? "현금/단기채" : "−1x 114800"} · 상한 ${(Math.min(0.15, state.regimeHedgePct) * 100).toFixed(0)}% · 월1회 · 2X 금지 · 실험·자문 아님</div>`
       : "";
   const goldNote =
     r.goldLog
