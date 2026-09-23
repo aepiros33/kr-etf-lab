@@ -145,6 +145,23 @@ function cls(n) {
   if (n == null || Number.isNaN(n)) return "";
   return n >= 0 ? "pos" : "neg";
 }
+
+/** Years on the curve lacking Jan (start) or Dec (end) are partial calendar years. */
+function partialYearSet(curve) {
+  const byY = {};
+  for (const p of curve || []) {
+    const d = Array.isArray(p) ? p[0] : p.d;
+    (byY[d.slice(0, 4)] ||= []).push(d);
+  }
+  const partial = new Set();
+  for (const [y, ds] of Object.entries(byY)) {
+    const hasJan = ds.some((d) => d.slice(5, 7) === "01");
+    const hasDec = ds.some((d) => d.slice(5, 7) === "12");
+    if (!hasJan || !hasDec) partial.add(y);
+  }
+  return partial;
+}
+
 function won(n) {
   if (n == null || Number.isNaN(n)) return "—";
   return Math.round(n).toLocaleString("ko-KR") + "원";
@@ -1210,14 +1227,20 @@ function renderResult(r, bench, picks, corr, tax) {
   const benchDd = bench && bench.curve ? computeDrawdown(bench.curve) : null;
   state.lastPortCurve = r.curve;
   state.lastBenchCurve = bench?.curve || null;
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${Object.keys({ ...r.yearly, ...(bench.yearly || {}) })
+  const partialYears = partialYearSet(r.curve);
+  const yearlyRows = Object.keys(r.yearly || {})
     .sort()
     .map((y) => {
-      const a = r.yearly[y],
-        b = bench.yearly && bench.yearly[y];
-      return `<tr><td>${y}</td><td class="${cls(a)}">${pct(a)}</td><td class="${cls(b)}">${pct(b)}</td></tr>`;
+      const a = r.yearly[y];
+      const b = bench.yearly ? bench.yearly[y] : undefined;
+      const yLabel = partialYears.has(y) ? `${y}*` : y;
+      return `<tr><td>${yLabel}</td><td class="${cls(a)}">${pct(a)}</td><td class="${cls(b)}">${pct(b)}</td></tr>`;
     })
-    .join("")}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 첫·마지막 해는 기간이 짧을 수 있음.</div><div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+    .join("");
+  const partialNote = partialYears.size
+    ? `<div class="warn">* 부분 연도: 해당 연도에 1월 또는 12월 거래일이 없어 공개 연간 수익률과 직접 비교하면 안 됩니다.</div>`
+    : "";
+  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);

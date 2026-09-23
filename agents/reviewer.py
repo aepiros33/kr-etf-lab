@@ -289,6 +289,50 @@ def main():
         if abs(stats.yearly[years[0]]) > 10 or abs(stats.yearly[years[-1]]) > 10:
             fail(f"{label} implausible partial-year return")
 
+    # --- At least 2 multi-asset presets: compound(yearly) ≈ total_return (lump) ---
+    preset_checked = 0
+    for pname in ("global6040", "growth80", "kAllWeather", "koreaUs"):
+        pw = PRESETS.get(pname)
+        if not pw:
+            continue
+        codes = [c for c in pw if c in prices]
+        if len(codes) < 2:
+            continue
+        tw = {c: pw[c] / 100.0 for c in codes}
+        # renormalize if some missing
+        ssum = sum(tw.values())
+        tw = {c: v / ssum for c, v in tw.items()}
+        try:
+            ps = backtest(tw, prices, start="2019-01-01", rebalance="Q")
+        except Exception as e:
+            fail(f"preset {pname} backtest error: {e}")
+        if len(ps.curve) < 20 or not ps.yearly:
+            continue
+        acc = 1.0
+        for y in sorted(ps.yearly.keys()):
+            acc *= 1.0 + ps.yearly[y]
+        compound = acc - 1.0
+        if abs(compound - ps.total_return) > 1e-9:
+            fail(
+                f"preset {pname} yearly compound {compound} != total_return {ps.total_return}"
+            )
+        # Partial-year detection: start year without Jan or end without Dec
+        by_y: dict[str, list[str]] = {}
+        for pt in ps.curve:
+            d = pt["d"] if isinstance(pt, dict) else pt[0]
+            by_y.setdefault(d[:4], []).append(d)
+        ys = sorted(by_y.keys())
+        if ys:
+            if not any(d[5:7] == "01" for d in by_y[ys[0]]) and ys[0] not in ps.yearly:
+                fail(f"preset {pname} missing start-year yearly key")
+            if not any(d[5:7] == "12" for d in by_y[ys[-1]]) and ys[-1] not in ps.yearly:
+                fail(f"preset {pname} missing end-year yearly key")
+        preset_checked += 1
+        if preset_checked >= 2:
+            break
+    if preset_checked < 2:
+        fail(f"need >=2 multi-asset presets for yearly compound; got {preset_checked}")
+
     # --- Drawdown helpers: maxDD matches engine mdd ---
     dd = compute_drawdown(s.curve)
     if abs(dd["maxDD"] - s.mdd) > 1e-12:
