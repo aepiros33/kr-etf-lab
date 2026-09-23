@@ -270,6 +270,7 @@ async function boot() {
     if (!res.ok) throw new Error("시세 파일이 없습니다. python3 agents/fast_ingest.py 를 실행하세요.");
     const bundle = await res.json();
     meta = bundle;
+    state._priceBundle = bundle;
     state.prices = Object.fromEntries(
       Object.entries(bundle.prices || {}).map(([code, rows]) => [
         code,
@@ -277,12 +278,30 @@ async function boot() {
       ])
     );
   } else if (meta.prices) {
+    state._priceBundle = meta;
     state.prices = Object.fromEntries(
       Object.entries(meta.prices).map(([code, rows]) => [
         code,
         Object.fromEntries(rows.map((r) => [r.d, r.c])),
       ])
     );
+  } else {
+    // meta-only Pages path: preload full price bundle once (no data/prices/*.json)
+    try {
+      const res = await fetch("./data/etf_prices.json");
+      if (res.ok) {
+        const bundle = await res.json();
+        state._priceBundle = bundle;
+        state.prices = Object.fromEntries(
+          Object.entries(bundle.prices || {}).map(([code, rows]) => [
+            code,
+            Object.fromEntries(rows.map((r) => [r.d, r.c])),
+          ])
+        );
+      }
+    } catch (_) {
+      /* ensurePrices will retry */
+    }
   }
 
   state.meta = meta;
@@ -460,19 +479,10 @@ async function ensurePrices(codes) {
       if (rows) state.prices[code] = Object.fromEntries(rows.map((r) => [r.d, r.c]));
       else missing.push(code);
     }
-    if (missing.length) {
-      await Promise.all(
-        missing.map(async (code) => {
-          try {
-            const res = await fetch(`./data/prices/${code}.json`);
-            if (!res.ok) return;
-            const rows = await res.json();
-            state.prices[code] = Object.fromEntries(rows.map((r) => [r.d, r.c]));
-          } catch {
-            /* ignore */
-          }
-        })
-      );
+    // data/prices/ is gitignored and not on GitHub Pages — never fetch it
+    // (avoids console 404). Local selective files: merge into etf_prices.json via ingest.
+    if (missing.length && !state._priceBundle) {
+      console.warn("시세 번들(etf_prices.json)을 불러오지 못했습니다.", missing);
     }
   } finally {
     state.loadingPrices = false;
