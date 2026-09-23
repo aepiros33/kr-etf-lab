@@ -659,7 +659,12 @@ function backtest(weights, priceMap, start, end, rebalance, initialCapital = 1, 
     }
     peak = Math.max(peak, value);
     mdd = Math.min(mdd, value / peak - 1);
-    curve.push({ d, v: value / initialCapital });
+    // v: wealth÷initial (MDD/rolling); ret: vs invested-to-date (matches KPI 누적)
+    curve.push({
+      d,
+      v: value / initialCapital,
+      ret: totalInvested > 0 ? value / totalInvested - 1 : 0,
+    });
     prev = d;
     prevValue = value;
   }
@@ -910,14 +915,20 @@ function renderRollingCard() {
   </div>`;
 }
 
+function fmtPctTooltip(v) {
+  if (v == null || Number.isNaN(v)) return "—";
+  const sign = v > 0 ? "+" : "";
+  return sign + Number(v).toFixed(1) + "%";
+}
+
 function drawDrawdownChart(dd, benchDd) {
   const ctx = document.getElementById("ddCurve");
   if (!ctx) return;
   if (state.ddChart) state.ddChart.destroy();
   const labels = dd.series.map((p) => p.d);
-  const port = dd.series.map((p) => +(p.dd * 100).toFixed(3));
+  const port = dd.series.map((p) => p.dd * 100);
   const bmap = Object.fromEntries((benchDd?.series || []).map((p) => [p.d, p.dd]));
-  const ben = dd.series.map((p) => +(((bmap[p.d] ?? 0) * 100).toFixed(3)));
+  const ben = dd.series.map((p) => (bmap[p.d] ?? 0) * 100);
   state.ddChart = new Chart(ctx, {
     type: "line",
     data: {
@@ -929,7 +940,7 @@ function drawDrawdownChart(dd, benchDd) {
           borderColor: "#ff6b7a",
           backgroundColor: "rgba(255,107,122,.22)",
           fill: true,
-          tension: 0.15,
+          tension: 0,
           pointRadius: 0,
           borderWidth: 1.6,
         },
@@ -939,7 +950,7 @@ function drawDrawdownChart(dd, benchDd) {
           borderColor: "#8b9aab",
           backgroundColor: "transparent",
           fill: false,
-          tension: 0.15,
+          tension: 0,
           pointRadius: 0,
           borderWidth: 1.2,
           borderDash: [4, 4],
@@ -950,7 +961,14 @@ function drawDrawdownChart(dd, benchDd) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      plugins: { legend: { labels: { color: "#8b9aab" } } },
+      plugins: {
+        legend: { labels: { color: "#8b9aab" } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${fmtPctTooltip(ctx.parsed.y)}`,
+          },
+        },
+      },
       scales: {
         x: { ticks: { color: "#667687", maxTicksLimit: 8 }, grid: { color: "rgba(39,49,64,.45)" } },
         y: {
@@ -1003,7 +1021,7 @@ function drawRollingChart(curve, windowKey) {
   }
   if (!roll.series.length) return;
   const labels = roll.series.map((p) => p.d);
-  const data = roll.series.map((p) => +(p.cagr * 100).toFixed(3));
+  const data = roll.series.map((p) => p.cagr * 100);
   state.rollingChart = new Chart(ctx, {
     type: "line",
     data: {
@@ -1015,7 +1033,7 @@ function drawRollingChart(curve, windowKey) {
           borderColor: "#f0c27a",
           backgroundColor: "rgba(240,194,122,.12)",
           fill: true,
-          tension: 0.15,
+          tension: 0,
           pointRadius: 0,
           borderWidth: 1.8,
         },
@@ -1025,7 +1043,14 @@ function drawRollingChart(curve, windowKey) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      plugins: { legend: { labels: { color: "#8b9aab" } } },
+      plugins: {
+        legend: { labels: { color: "#8b9aab" } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${fmtPctTooltip(ctx.parsed.y)}`,
+          },
+        },
+      },
       scales: {
         x: { ticks: { color: "#667687", maxTicksLimit: 8 }, grid: { color: "rgba(39,49,64,.45)" } },
         y: {
@@ -1095,10 +1120,11 @@ function kpi(label, val, klass) {
 }
 
 function drawChart(r, bench) {
-  const bmap = Object.fromEntries((bench.curve || []).map((p) => [p.d, p.v]));
+  // Plot cumulative return % matching KPI 누적 수익률 (ret vs invested-to-date).
+  const bmap = Object.fromEntries((bench.curve || []).map((p) => [p.d, p.ret]));
   const labels = r.curve.map((p) => p.d);
-  const port = r.curve.map((p) => +(p.v * 100).toFixed(2));
-  const ben = r.curve.map((p) => +(((bmap[p.d] || 1) * 100).toFixed(2)));
+  const port = r.curve.map((p) => p.ret * 100);
+  const ben = r.curve.map((p) => (bmap[p.d] ?? 0) * 100);
   const ctx = document.getElementById("curve");
   if (state.chart) state.chart.destroy();
   state.chart = new Chart(ctx, {
@@ -1107,12 +1133,12 @@ function drawChart(r, bench) {
       labels,
       datasets: [
         {
-          label: r.monthlyContribution > 0 ? "포트폴리오(자산/원금)" : "포트폴리오",
+          label: "누적 수익률",
           data: port,
           borderColor: "#7dd3c0",
           backgroundColor: "rgba(125,211,192,.12)",
           fill: true,
-          tension: 0.15,
+          tension: 0,
           pointRadius: 0,
           borderWidth: 2,
         },
@@ -1120,7 +1146,7 @@ function drawChart(r, bench) {
           label: "KODEX 200",
           data: ben,
           borderColor: "#8b9aab",
-          tension: 0.15,
+          tension: 0,
           pointRadius: 0,
           borderWidth: 1.4,
           borderDash: [4, 4],
@@ -1131,10 +1157,23 @@ function drawChart(r, bench) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      plugins: { legend: { labels: { color: "#8b9aab" } } },
+      plugins: {
+        legend: { labels: { color: "#8b9aab" } },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => `${ctx.dataset.label}: ${fmtPctTooltip(ctx.parsed.y)}`,
+          },
+        },
+      },
       scales: {
         x: { ticks: { color: "#667687", maxTicksLimit: 8 }, grid: { color: "rgba(39,49,64,.45)" } },
-        y: { ticks: { color: "#667687" }, grid: { color: "rgba(39,49,64,.45)" } },
+        y: {
+          ticks: {
+            color: "#667687",
+            callback: (v) => v + "%",
+          },
+          grid: { color: "rgba(39,49,64,.45)" },
+        },
       },
     },
   });

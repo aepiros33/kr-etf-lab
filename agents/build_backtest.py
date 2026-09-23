@@ -167,7 +167,8 @@ def backtest(
 
         peak = max(peak, value)
         mdd = min(mdd, value / peak - 1.0)
-        curve.append((d, value))
+        # (date, wealth, invested_to_date) — invested grows with DCA cash-ins
+        curve.append((d, value, total_invested))
         prev = d
         prev_value = value
 
@@ -183,7 +184,7 @@ def backtest(
     # Yearly calendar returns on wealth path (indexed to initial capital).
     yearly = {}
     by_year = {}
-    for d, v in curve:
+    for d, v, _inv in curve:
         by_year.setdefault(d[:4], []).append(v / initial_capital)
     for y, vs in by_year.items():
         yearly[y] = vs[-1] / vs[0] - 1.0
@@ -195,8 +196,12 @@ def backtest(
     std = statistics.stdev(rets) if len(rets) > 2 else 0
     sharpe = (mean_ex / std) * (252 ** 0.5) if std else 0.0
     ys = list(yearly.values())
-    # Curve stored as wealth index (÷ initial) so charts start near 1.0
-    curve_idx = [(d, v / initial_capital) for d, v in curve]
+    # Curve: (date, wealth÷initial, cum_return vs invested_to_date).
+    # v for MDD/rolling; ret ends at total_return (matches KPI 누적 수익률).
+    curve_idx = [
+        (d, v / initial_capital, (v / inv - 1.0) if inv > 0 else 0.0)
+        for d, v, inv in curve
+    ]
     return Stats(
         start=curve[0][0],
         end=curve[-1][0],
@@ -227,6 +232,18 @@ def _curve_pairs(curve):
         else:
             out.append((point[0], float(point[1])))
     return out
+
+
+
+def curve_cum_return(point) -> float:
+    """Cumulative return vs invested-to-date from a curve point (dict or tuple)."""
+    if isinstance(point, dict):
+        if "ret" in point:
+            return float(point["ret"])
+        raise KeyError("curve point missing ret")
+    if len(point) < 3:
+        raise ValueError("curve point missing cum_return (3rd field)")
+    return float(point[2])
 
 
 def compute_drawdown(curve, episode_threshold: float = -0.05):

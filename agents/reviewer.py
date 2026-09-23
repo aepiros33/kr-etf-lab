@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from build_backtest import backtest, load, compute_drawdown, rolling_cagr, ROLLING_WINDOWS
+from build_backtest import backtest, load, compute_drawdown, rolling_cagr, ROLLING_WINDOWS, curve_cum_return
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -172,7 +172,8 @@ def main():
         fail("rebalance day-0 mismatch")
     # On a rebalance day, portfolio value must stay continuous (no wipe to 0/1).
     for i in range(1, min(len(mixed_q.curve), 400)):
-        d, v = mixed_q.curve[i]
+        pt = mixed_q.curve[i]
+        d, v = (pt["d"], pt["v"]) if isinstance(pt, dict) else (pt[0], pt[1])
         if v <= 0:
             fail(f"non-positive value on {d}")
 
@@ -220,6 +221,21 @@ def main():
         fail("need >=2 tickers for corr invariants")
     matrix = corr_matrix(corr_codes[:3], prices, start="2019-01-01")
     check_corr_invariants(matrix)
+
+
+    # --- Chart cum-return series ends at total_return (KPI 누적 수익률) ---
+    for label, stats in (("lump", lump), ("dca", dca), ("kodex", s)):
+        if not stats.curve:
+            fail(f"{label} empty curve")
+        end_ret = curve_cum_return(stats.curve[-1])
+        if abs(end_ret - stats.total_return) > 1e-12:
+            fail(f"{label} chart end ret {end_ret} != total_return {stats.total_return}")
+        # Lump: ret == v - 1 (wealth index starts at 1, invested fixed)
+        if label != "dca":
+            pt = stats.curve[-1]
+            v = pt["v"] if isinstance(pt, dict) else pt[1]
+            if abs(end_ret - (v - 1.0)) > 1e-12:
+                fail(f"{label} ret != v-1 for non-DCA: {end_ret} vs {v - 1.0}")
 
     # --- Drawdown helpers: maxDD matches engine mdd ---
     dd = compute_drawdown(s.curve)
@@ -288,7 +304,9 @@ def main():
         f"dca_invested={dca.total_invested:.0f} "
         f"presets={len(PRESETS)} corr_n={len(corr_codes[:3])} "
         f"dd_max={dd['maxDD']:.2%} uw={dd['underwaterDays']} "
-        f"roll1y_n={len(roll['series'])}"
+        f"roll1y_n={len(roll['series'])} "
+        f"chart_end={curve_cum_return(s.curve[-1]):.2%} "
+        f"dca_chart_end={curve_cum_return(dca.curve[-1]):.2%}"
     )
 
 
