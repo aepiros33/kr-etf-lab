@@ -167,6 +167,11 @@ const state = {
   lastRun: null,
   /** Preset key if selection still matches that preset; else null. */
   activePreset: null,
+  /** Multi-port compare slots (Batch 3). Each: {label,presetKey,picks,cfg,result} or null. */
+  compareSlots: { A: null, B: null },
+  compareChart: null,
+  /** "single" | "compare" */
+  viewMode: "single",
   dcaOn: false,
   initialCapital: 10_000_000,
   monthlyAmount: 500_000,
@@ -333,8 +338,11 @@ function renderExportBar() {
   return `<div class="export-bar btn-row" id="exportBar">
     <button type="button" class="secondary" id="btnExportCsv">결과 CSV</button>
     <button type="button" class="secondary" id="btnCopyShare">설정 링크 복사</button>
+    <button type="button" class="secondary" id="btnSaveSlotA">A에 저장</button>
+    <button type="button" class="secondary" id="btnSaveSlotB">B에 저장</button>
   </div>
-  <p class="muted-note" id="shareUrlNote">공유 URL은 해시(#)에 프리셋 또는 코드·비중, 기간, 리밸런싱·오버레이 플래그를 넣습니다. 상세는 docs/SHARE_URL.md. 투자 자문 아님.</p>`;
+  <p class="muted-note" id="shareUrlNote">공유 URL은 해시(#)에 프리셋 또는 코드·비중, 기간, 리밸런싱·오버레이 플래그를 넣습니다. 상세는 docs/SHARE_URL.md. 투자 자문 아님.</p>
+  <p class="muted-note">실행 결과를 슬롯 A/B에 저장한 뒤 「비교 보기」로 나란히 볼 수 있습니다.</p>`;
 }
 
 /** Compact share state → location.hash (v=1). Prefer preset id when selection matches. */
@@ -662,6 +670,10 @@ function wireExportBar() {
   if (csvBtn) csvBtn.onclick = () => exportRunCsv();
   const shareBtn = $("#btnCopyShare");
   if (shareBtn) shareBtn.onclick = () => copyShareUrl();
+  const aBtn = document.querySelector("#btnSaveSlotA, #btnSlotSaveA");
+  if (aBtn) aBtn.onclick = () => saveCurrentToSlot("A");
+  const bBtn = document.querySelector("#btnSaveSlotB, #btnSlotSaveB");
+  if (bBtn) bBtn.onclick = () => saveCurrentToSlot("B");
 }
 
 
@@ -2168,6 +2180,10 @@ function destroyExtraCharts() {
     state.rollingChart.destroy();
     state.rollingChart = null;
   }
+  if (state.compareChart) {
+    state.compareChart.destroy();
+    state.compareChart = null;
+  }
 }
 
 function renderDrawdownCard(dd, benchDd) {
@@ -2392,6 +2408,506 @@ function renderMomHoldings(rows) {
   </div>`;
 }
 
+
+/* ===== Batch 3: 멀티 포트 비교 (UI orchestration of two backtest runs) ===== */
+
+function currentStrategyCfg() {
+  return {
+    rebalance: state.rebalance,
+    momLookback: state.momLookback,
+    momTopN: state.momTopN,
+    weighting: state.weighting,
+    volWindow: state.volWindow,
+    maOverlay: state.maOverlay,
+    maWindow: state.maWindow,
+    cashCode: state.cashCode || "153130",
+    maCashPct: state.maCashPct,
+    regimeHedge: state.regimeHedge,
+    regimeHedgeMode: state.regimeHedgeMode,
+    regimeHedgePct: Math.min(0.15, Math.max(0, Number(state.regimeHedgePct) || 0.15)),
+    regimeHedgeCode: state.regimeHedgeCode || "114800",
+    goldOn: state.goldOn,
+    goldSleevePct: clampGoldSleeve(state.goldSleevePct),
+    goldLookback: state.goldLookback,
+    goldCode: resolveGoldCode(state.goldCode),
+    dcaOn: state.dcaOn,
+    initialCapital: state.initialCapital,
+    monthlyAmount: state.monthlyAmount,
+    totalReturn: state.totalReturn,
+  };
+}
+
+function slotLabelFromPicks(picks, presetKey) {
+  if (presetKey && PRESETS[presetKey]) return PRESETS[presetKey].label;
+  if (!picks || !picks.length) return "빈 포트";
+  const codes = picks.map(([c]) => c);
+  if (codes.length <= 3) return `커스텀 (${codes.join("+")})`;
+  return `커스텀 (${codes.length}종목)`;
+}
+
+function buildSlotFromLastRun() {
+  const pack = state.lastRun;
+  if (!pack || !pack.result || pack.result.error) return null;
+  const picks = pack.picks.map(([c, w]) => [c, w]);
+  return {
+    label: slotLabelFromPicks(picks, state.activePreset),
+    presetKey: state.activePreset,
+    picks,
+    cfg: currentStrategyCfg(),
+    requestedStart: pack.requestedStart || pack.result.start,
+    requestedEnd: pack.requestedEnd || pack.result.end,
+    result: pack.result,
+  };
+}
+
+function saveCurrentToSlot(slotId) {
+  const slot = buildSlotFromLastRun();
+  if (!slot) {
+    setCompareStatus("저장할 실행 결과가 없습니다. 먼저 백테스트를 실행하세요.");
+    return;
+  }
+  state.compareSlots[slotId] = slot;
+  updateComparePanel();
+  setCompareStatus(`슬롯 ${slotId}에 저장: ${slot.label}`);
+  if (state.compareSlots.A && state.compareSlots.B) {
+    showCompareView().catch((err) => setCompareStatus(String(err.message || err)));
+  }
+}
+
+function clearCompareSlots() {
+  state.compareSlots = { A: null, B: null };
+  state.viewMode = "single";
+  updateComparePanel();
+  setCompareStatus("슬롯 A/B를 비웠습니다.");
+  if (state.lastRun && state.lastRun.result && !state.lastRun.result.error) {
+    const p = state.lastRun;
+    renderResult(p.result, p.bench, p.picks, p.corr, p.tax, p.windowInfo);
+  }
+}
+
+function holdingsSummary(picks) {
+  if (!picks || !picks.length) return "—";
+  return picks
+    .map(([c, w]) => `${c} ${Number(w).toFixed(w % 1 ? 1 : 0)}%`)
+    .join(" · ");
+}
+
+function updateComparePanel() {
+  const a = state.compareSlots.A;
+  const b = state.compareSlots.B;
+  const elA = $("#slotAStatus");
+  const elB = $("#slotBStatus");
+  if (elA) {
+    elA.textContent = a
+      ? `A · ${a.label} · ${a.result.start}~${a.result.end}`
+      : "A · 비어 있음";
+    elA.classList.toggle("filled", !!a);
+  }
+  if (elB) {
+    elB.textContent = b
+      ? `B · ${b.label} · ${b.result.start}~${b.result.end}`
+      : "B · 비어 있음";
+    elB.classList.toggle("filled", !!b);
+  }
+  const btnShow = $("#btnShowCompare");
+  if (btnShow) btnShow.disabled = !(a && b);
+}
+
+function setCompareStatus(msg) {
+  const el = $("#compareStatus");
+  if (el) el.textContent = msg || "";
+}
+
+/** Ensure prices + run one portfolio with explicit picks/cfg/window. */
+async function executePortBacktest(picks, start, end, cfg) {
+  const codes = picks.map(([c]) => c);
+  const needCash =
+    cfg.rebalance === "DMOM" ||
+    cfg.maOverlay ||
+    (cfg.regimeHedge && cfg.regimeHedgeMode === "cash");
+  const needHedge = !!cfg.regimeHedge;
+  const needGold = !!cfg.goldOn;
+  const extra = [BENCH];
+  if (needCash) extra.push(cfg.cashCode || "153130");
+  if (needHedge) {
+    extra.push(REGIME_HEDGE_B);
+    if (cfg.regimeHedgeMode === "inverse") extra.push(cfg.regimeHedgeCode || "114800");
+    else extra.push(cfg.cashCode || "153130");
+  }
+  if (needGold) extra.push(resolveGoldCode(cfg.goldCode), GOLD_CASH);
+  await ensurePrices([...codes, ...extra]);
+  for (const c of codes) {
+    if (!state.prices[c]) return { error: `${c} 시세가 없습니다.` };
+  }
+  const hedgeLoad = needHedge
+    ? [
+        REGIME_HEDGE_B,
+        cfg.regimeHedgeMode === "cash"
+          ? cfg.cashCode || "153130"
+          : cfg.regimeHedgeCode || "114800",
+      ]
+    : [];
+  const loadCodes = [
+    ...new Set([
+      ...codes,
+      BENCH,
+      ...(needCash ? [cfg.cashCode || "153130"] : []),
+      ...hedgeLoad,
+      ...(needGold ? [resolveGoldCode(cfg.goldCode), GOLD_CASH] : []),
+    ]),
+  ];
+  const priceMap = cfg.totalReturn
+    ? buildTotalReturnPrices(state.prices, loadCodes)
+    : state.prices;
+  const initial = cfg.dcaOn ? cfg.initialCapital : 1;
+  const monthly = cfg.dcaOn ? cfg.monthlyAmount : 0;
+  return backtest(Object.fromEntries(picks), priceMap, start, end, cfg.rebalance, initial, monthly, {
+    lookback: cfg.momLookback,
+    topN: cfg.momTopN,
+    cost: 0.001,
+    weighting: cfg.weighting,
+    volWindow: cfg.volWindow,
+    maOverlay: cfg.maOverlay,
+    maWindow: cfg.maWindow,
+    cashCode: cfg.cashCode || "153130",
+    maCashPct: cfg.maCashPct,
+    regimeHedge: cfg.regimeHedge,
+    regimeHedgeMode: cfg.regimeHedgeMode,
+    regimeHedgePct: Math.min(0.15, Math.max(0, Number(cfg.regimeHedgePct) || 0.15)),
+    regimeHedgeCode: cfg.regimeHedgeCode || "114800",
+    goldOn: cfg.goldOn,
+    goldSleevePct: clampGoldSleeve(cfg.goldSleevePct),
+    goldLookback: cfg.goldLookback,
+    goldCode: resolveGoldCode(cfg.goldCode),
+  });
+}
+
+/** Re-run both slots on intersection of their result windows. */
+async function alignCompareSlots() {
+  const a = state.compareSlots.A;
+  const b = state.compareSlots.B;
+  if (!a || !b) throw new Error("슬롯 A와 B를 모두 채워 주세요.");
+  const commonStart =
+    a.result.start > b.result.start ? a.result.start : b.result.start;
+  const commonEnd = a.result.end < b.result.end ? a.result.end : b.result.end;
+  if (commonStart >= commonEnd) {
+    throw new Error(
+      `공통 기간이 없습니다. A ${a.result.start}~${a.result.end} / B ${b.result.start}~${b.result.end}`
+    );
+  }
+  const ra = await executePortBacktest(a.picks, commonStart, commonEnd, a.cfg);
+  if (ra.error) throw new Error(`포트 A: ${ra.error}`);
+  const rb = await executePortBacktest(b.picks, commonStart, commonEnd, b.cfg);
+  if (rb.error) throw new Error(`포트 B: ${rb.error}`);
+  const start = ra.start > rb.start ? ra.start : rb.start;
+  const end = ra.end < rb.end ? ra.end : rb.end;
+  return {
+    A: { ...a, result: ra },
+    B: { ...b, result: rb },
+    commonStart: start,
+    commonEnd: end,
+    truncated:
+      commonStart > (a.requestedStart || a.result.start) ||
+      commonStart > (b.requestedStart || b.result.start) ||
+      a.result.start !== ra.start ||
+      b.result.start !== rb.start,
+  };
+}
+
+async function showCompareView() {
+  setCompareStatus("비교 계산 중…");
+  const aligned = await alignCompareSlots();
+  state.viewMode = "compare";
+  renderCompareView(aligned);
+  setCompareStatus(`비교 기간 ${aligned.commonStart} ~ ${aligned.commonEnd} (교집합)`);
+}
+
+async function runDualPresetCompare() {
+  const keyA = $("#comparePresetA") && $("#comparePresetA").value;
+  const keyB = $("#comparePresetB") && $("#comparePresetB").value;
+  if (!keyA || !keyB) {
+    setCompareStatus("프리셋 A·B를 선택하세요.");
+    return;
+  }
+  if (keyA === keyB) {
+    setCompareStatus("서로 다른 프리셋을 고르세요.");
+    return;
+  }
+  if (!PRESETS[keyA] || !PRESETS[keyB]) {
+    setCompareStatus("알 수 없는 프리셋입니다.");
+    return;
+  }
+  setCompareStatus("프리셋 비교 실행 중…");
+  const [reqStart, reqEnd] = periodBounds();
+  const cfg = currentStrategyCfg();
+  const picksA = Object.entries(PRESETS[keyA].w).filter(([, w]) => w > 0);
+  const picksB = Object.entries(PRESETS[keyB].w).filter(([, w]) => w > 0);
+  await ensurePrices([
+    ...picksA.map(([c]) => c),
+    ...picksB.map(([c]) => c),
+    BENCH,
+  ]);
+  const ra0 = await executePortBacktest(picksA, reqStart, reqEnd, cfg);
+  if (ra0.error) {
+    setCompareStatus(`포트 A: ${ra0.error}`);
+    return;
+  }
+  const rb0 = await executePortBacktest(picksB, reqStart, reqEnd, cfg);
+  if (rb0.error) {
+    setCompareStatus(`포트 B: ${rb0.error}`);
+    return;
+  }
+  state.compareSlots.A = {
+    label: PRESETS[keyA].label,
+    presetKey: keyA,
+    picks: picksA,
+    cfg,
+    requestedStart: reqStart,
+    requestedEnd: reqEnd,
+    result: ra0,
+  };
+  state.compareSlots.B = {
+    label: PRESETS[keyB].label,
+    presetKey: keyB,
+    picks: picksB,
+    cfg,
+    requestedStart: reqStart,
+    requestedEnd: reqEnd,
+    result: rb0,
+  };
+  updateComparePanel();
+  await showCompareView();
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderCompareView(aligned) {
+  const host = $("#result");
+  const a = aligned.A;
+  const b = aligned.B;
+  const ra = a.result;
+  const rb = b.result;
+  destroyExtraCharts();
+  if (state.chart) {
+    state.chart.destroy();
+    state.chart = null;
+  }
+
+  const fmtDiff = (na, nb, kind) => {
+    if (na == null || nb == null || !Number.isFinite(na) || !Number.isFinite(nb)) {
+      return { text: "—", klass: "" };
+    }
+    const d = na - nb;
+    if (kind === "pct") return { text: pct(d, 2), klass: cls(d) };
+    if (kind === "num") return { text: d.toFixed(2), klass: cls(d) };
+    return { text: String(d), klass: cls(d) };
+  };
+  const row = (label, textA, textB, na, nb, kind, klassA, klassB) => {
+    const d = fmtDiff(na, nb, kind);
+    return `<tr>
+      <th scope="row">${label}</th>
+      <td class="${klassA || ""}">${textA}</td>
+      <td class="${klassB || ""}">${textB}</td>
+      <td class="${d.klass}">${d.text}</td>
+    </tr>`;
+  };
+
+  const periodA = `${ra.start} ~ ${ra.end}`;
+  const periodB = `${rb.start} ~ ${rb.end}`;
+  const yearsStr = (r) => `${Number(r.years).toFixed(1)}년 · ${r.days}일`;
+
+  const kpiTable = `<div class="card pad compare-kpi-card">
+    <div class="section-title">멀티 포트 비교 · KPI</div>
+    <div class="compare-labels">
+      <span class="slot-pill slot-a">A · ${escapeHtml(a.label)}</span>
+      <span class="slot-pill slot-b">B · ${escapeHtml(b.label)}</span>
+    </div>
+    <div class="compare-table-wrap">
+      <table class="compare-table">
+        <thead><tr><th>지표</th><th>A</th><th>B</th><th>차이(A−B)</th></tr></thead>
+        <tbody>
+          ${row("연환산 수익률", pct(ra.cagr), pct(rb.cagr), ra.cagr, rb.cagr, "pct", cls(ra.cagr), cls(rb.cagr))}
+          ${row("누적 수익률", pct(ra.totalRet, 2), pct(rb.totalRet, 2), ra.totalRet, rb.totalRet, "pct", cls(ra.totalRet), cls(rb.totalRet))}
+          ${row("최대낙폭", pct(ra.mdd), pct(rb.mdd), ra.mdd, rb.mdd, "pct", "neg", "neg")}
+          ${row("변동성", pct(ra.vol, 1), pct(rb.vol, 1), ra.vol, rb.vol, "pct", "", "")}
+          ${row("샤프", ra.sharpe.toFixed(2), rb.sharpe.toFixed(2), ra.sharpe, rb.sharpe, "num", cls(ra.sharpe), cls(rb.sharpe))}
+          <tr><th scope="row">기간</th><td>${periodA}</td><td>${periodB}</td><td>—</td></tr>
+          <tr><th scope="row">길이</th><td>${yearsStr(ra)}</td><td>${yearsStr(rb)}</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="warn">비교 창 ${aligned.commonStart} ~ ${aligned.commonEnd} (두 포트 결과의 교집합으로 재실행) · 과거 시뮬 · 투자 자문 아님</div>
+  </div>`;
+
+  const holdCard = `<div class="card pad compare-hold-card">
+    <div class="section-title">보유 비중</div>
+    <div class="compare-hold-grid">
+      <div><div class="slot-pill slot-a">A</div><p class="muted-note">${escapeHtml(holdingsSummary(a.picks))}</p></div>
+      <div><div class="slot-pill slot-b">B</div><p class="muted-note">${escapeHtml(holdingsSummary(b.picks))}</p></div>
+    </div>
+  </div>`;
+
+  const chartCard = `<div class="card chart-wrap compare-chart-wrap"><canvas id="compareCurve" height="320"></canvas></div>`;
+  const actions = `<div class="export-bar btn-row compare-actions">
+    <button type="button" class="secondary" id="btnBackSingle">단일 결과로</button>
+    <button type="button" class="secondary" id="btnClearSlotsFromCompare">슬롯 비우기</button>
+  </div>`;
+
+  host.innerHTML = `${actions}${kpiTable}${chartCard}${holdCard}
+    <div class="card pad"><div class="section-title">리뷰 에이전트</div>
+    <div class="agent" id="agentText"></div></div>`;
+
+  drawCompareChart(ra, rb, a.label, b.label);
+  const agent = $("#agentText");
+  if (agent) {
+    agent.textContent = [
+      `비교 메모 · 공통 기간 ${aligned.commonStart} ~ ${aligned.commonEnd}`,
+      "",
+      `· A ${a.label}: 연환산 ${pct(ra.cagr)} · 누적 ${pct(ra.totalRet, 2)} · MDD ${pct(ra.mdd)} · 샤프 ${ra.sharpe.toFixed(2)}`,
+      `· B ${b.label}: 연환산 ${pct(rb.cagr)} · 누적 ${pct(rb.totalRet, 2)} · MDD ${pct(rb.mdd)} · 샤프 ${rb.sharpe.toFixed(2)}`,
+      `· 연환산 차이(A−B) ${pct(ra.cagr - rb.cagr, 2)} · MDD 차이(A−B) ${pct(ra.mdd - rb.mdd, 2)}`,
+      "",
+      "한계",
+      "· 두 포트 각각 동일 엔진으로 재실행한 교집합 기간입니다.",
+      "· 설정(리밸런싱·DCA·오버레이)이 슬롯마다 다를 수 있습니다.",
+      "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
+    ].join("\n");
+  }
+
+  const backBtn = $("#btnBackSingle");
+  if (backBtn)
+    backBtn.onclick = () => {
+      state.viewMode = "single";
+      if (state.lastRun && state.lastRun.result && !state.lastRun.result.error) {
+        const p = state.lastRun;
+        renderResult(p.result, p.bench, p.picks, p.corr, p.tax, p.windowInfo);
+      } else {
+        host.innerHTML = `<div class="card pad empty">단일 결과가 없습니다. 백테스트를 실행하세요.</div>`;
+      }
+    };
+  const clearBtn = $("#btnClearSlotsFromCompare");
+  if (clearBtn) clearBtn.onclick = () => clearCompareSlots();
+}
+
+function drawCompareChart(ra, rb, labelA, labelB) {
+  const setB = new Set(rb.curve.map((p) => p.d));
+  const labels = ra.curve.map((p) => p.d).filter((d) => setB.has(d));
+  const mapA = Object.fromEntries(ra.curve.map((p) => [p.d, p.ret]));
+  const mapB = Object.fromEntries(rb.curve.map((p) => [p.d, p.ret]));
+  const baseA = labels.length ? mapA[labels[0]] || 0 : 0;
+  const baseB = labels.length ? mapB[labels[0]] || 0 : 0;
+  const seriesA = labels.map((d) => ((1 + mapA[d]) / (1 + baseA) - 1) * 100);
+  const seriesB = labels.map((d) => ((1 + mapB[d]) / (1 + baseB) - 1) * 100);
+  const ctx = document.getElementById("compareCurve");
+  if (!ctx) return;
+  if (state.compareChart) {
+    state.compareChart.destroy();
+    state.compareChart = null;
+  }
+  state.compareChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: `A · ${labelA}`,
+          data: seriesA,
+          borderColor: "#7dd3c0",
+          backgroundColor: "rgba(125,211,192,.10)",
+          fill: false,
+          tension: 0,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+        {
+          label: `B · ${labelB}`,
+          data: seriesB,
+          borderColor: "#f0c27a",
+          backgroundColor: "rgba(240,194,122,.08)",
+          fill: false,
+          tension: 0,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { labels: { color: "#8b9aab" } },
+        tooltip: {
+          callbacks: {
+            label: (c) => `${c.dataset.label}: ${fmtPctTooltip(c.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: "#667687", maxTicksLimit: 8 },
+          grid: { color: "rgba(39,49,64,.45)" },
+        },
+        y: {
+          ticks: {
+            color: "#667687",
+            callback: (v) => v + "%",
+          },
+          grid: { color: "rgba(39,49,64,.45)" },
+        },
+      },
+    },
+  });
+}
+
+function fillComparePresetSelects() {
+  ["comparePresetA", "comparePresetB"].forEach((id, idx) => {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = "";
+    const ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = idx === 0 ? "프리셋 A" : "프리셋 B";
+    sel.appendChild(ph);
+    Object.entries(PRESETS).forEach(([k, p]) => {
+      const opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    });
+    if (cur && PRESETS[cur]) sel.value = cur;
+  });
+}
+
+function wireComparePanel() {
+  fillComparePresetSelects();
+  updateComparePanel();
+  const saveA = $("#btnSlotSaveA");
+  if (saveA) saveA.onclick = () => saveCurrentToSlot("A");
+  const saveB = $("#btnSlotSaveB");
+  if (saveB) saveB.onclick = () => saveCurrentToSlot("B");
+  const show = $("#btnShowCompare");
+  if (show)
+    show.onclick = () => {
+      showCompareView().catch((err) => setCompareStatus(String(err.message || err)));
+    };
+  const clear = $("#btnClearSlots");
+  if (clear) clear.onclick = () => clearCompareSlots();
+  const dual = $("#btnDualPresetCompare");
+  if (dual)
+    dual.onclick = () => {
+      runDualPresetCompare().catch((err) => setCompareStatus(String(err.message || err)));
+    };
+}
+
+
 function renderResult(r, bench, picks, corr, tax, windowInfo) {
   const host = $("#result");
   if (r.error) {
@@ -2400,6 +2916,7 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
     host.innerHTML = `<div class="card pad empty">${r.error}</div>`;
     return;
   }
+  state.viewMode = "single";
   const dcaNote =
     r.monthlyContribution > 0
       ? `<div class="warn">월 적립 · 납입 합 ${won(r.totalInvested)} → 기말 ${won(r.finalValue)} · ${r.contributions}회 납입 · 수익률은 납입 원금 합 대비</div>`
@@ -2700,6 +3217,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#run").onclick = () => run();
   const shareSettingsBtn = document.getElementById("btnShareSettings");
   if (shareSettingsBtn) shareSettingsBtn.onclick = () => copyShareUrl();
+  wireComparePanel();
   boot().catch((err) => {
     $("#result").innerHTML = `<div class="card pad empty">${err.message || err}</div>`;
   });

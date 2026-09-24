@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=batch2export1" />
+  <link rel="stylesheet" href="./styles.css?v=batch3compare1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -187,6 +187,29 @@
         </div>
         <p class="muted-note">세금·IRP 안전자산 표시는 단순 참고 모형이며 세무·법률 자문이 아닙니다.</p>
 
+        <div class="section-title">멀티 포트 비교</div>
+        <div class="compare-panel" id="comparePanel">
+          <div class="compare-slots">
+            <div class="slot-status" id="slotAStatus">A · 비어 있음</div>
+            <div class="slot-status" id="slotBStatus">B · 비어 있음</div>
+          </div>
+          <div class="btn-row compare-slot-btns">
+            <button type="button" class="secondary" id="btnSlotSaveA">A에 저장</button>
+            <button type="button" class="secondary" id="btnSlotSaveB">B에 저장</button>
+            <button type="button" class="secondary" id="btnShowCompare" disabled>비교 보기</button>
+            <button type="button" class="secondary" id="btnClearSlots">슬롯 비우기</button>
+          </div>
+          <p class="muted-note">실행 후 A/B에 저장 → 보유를 바꿔 다시 실행 → 다른 슬롯에 저장. 또는 아래 프리셋 둘을 고르고 비교 실행.</p>
+          <div class="row compare-preset-row">
+            <select id="comparePresetA" aria-label="비교 프리셋 A"></select>
+            <select id="comparePresetB" aria-label="비교 프리셋 B"></select>
+          </div>
+          <div class="btn-row">
+            <button type="button" class="primary" id="btnDualPresetCompare">비교 실행</button>
+          </div>
+          <p class="muted-note" id="compareStatus"></p>
+        </div>
+
         <div class="section-title">ETF 검색 · 필터</div>
         <div class="row">
           <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
@@ -218,6 +241,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=batch2export1"></script>
+  <script src="./app.js?v=batch3compare1"></script>
 </body>
 </html>

@@ -290,3 +290,91 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
 .window-summary { font-size: 13px; line-height: 1.55; color: var(--text); }
 .window-list { margin: 8px 0 0; padding-left: 1.2em; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .window-list code { color: var(--accent); font-size: 11px; }
+
+
+/* Batch 3: multi-port compare */
+.compare-panel { margin-bottom: 8px; }
+.compare-slots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.slot-status {
+  font-size: 11px;
+  color: var(--dim);
+  background: #121922;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  line-height: 1.35;
+  min-height: 2.6em;
+}
+.slot-status.filled {
+  color: var(--text);
+  border-color: rgba(125,211,192,.35);
+}
+.compare-slot-btns .secondary {
+  flex: 1 1 calc(50% - 8px);
+  min-width: 0;
+  padding: 10px 8px;
+  font-size: 12px;
+}
+.compare-preset-row { margin-bottom: 8px; }
+.compare-labels {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin: 4px 0 12px;
+}
+.slot-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+.slot-pill.slot-a {
+  color: #7dd3c0;
+  background: rgba(125,211,192,.12);
+  border: 1px solid rgba(125,211,192,.4);
+}
+.slot-pill.slot-b {
+  color: #f0c27a;
+  background: rgba(240,194,122,.12);
+  border: 1px solid rgba(240,194,122,.4);
+}
+.compare-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.compare-table th, .compare-table td {
+  text-align: right;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.compare-table th:first-child, .compare-table td:first-child {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+}
+.compare-table thead th {
+  color: var(--dim);
+  font-size: 11px;
+  font-weight: 700;
+}
+.compare-chart-wrap { height: 320px; margin-top: 12px; }
+.compare-hold-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.compare-hold-card { margin-top: 12px; }
+.compare-actions { margin-bottom: 12px; }
+@media (max-width: 900px) {
+  .compare-slots { grid-template-columns: 1fr; }
+  .compare-hold-grid { grid-template-columns: 1fr; }
+  .compare-chart-wrap { height: 260px; }
+  .compare-slot-btns { flex-wrap: wrap; }
+}
