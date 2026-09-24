@@ -119,7 +119,7 @@ def _is_rebal(prev, cur, rebalance: str) -> bool:
     cy, cm, *_ = cur.split("-")
     if rebalance == "Y":
         return py != cy
-    if rebalance in ("M", "MOM", "DMOM"):
+    if rebalance in ("M", "MOM", "DMOM", "MOM12_1", "XSMOM"):
         return prev[:7] != cur[:7]
     q = lambda m: (int(m) - 1) // 3
     return py != cy or q(pm) != q(cm)
@@ -248,6 +248,238 @@ def _dual_momentum_pick(
     for c in slots:
         tw[c] = tw.get(c, 0.0) + 1.0 / n
     return list(tw.keys()), tw
+
+
+
+def _momentum_pick_12_1(
+    universe: list[str],
+    prices: dict,
+    signal_month: str,
+    top_n: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+) -> tuple[list[str], dict[str, float]]:
+    """12-1 skip-month MOM: 12m return ending at prior-prior month-end (skip most recent 1m)."""
+    end_ym = _shift_month(signal_month, -2)  # skip most recent completed month
+    start_ym = _shift_month(end_ym, -12)
+    scored: list[tuple[float, str]] = []
+    for c in universe:
+        ends = month_ends_cache.get(c) or {}
+        if end_ym not in ends or start_ym not in ends:
+            continue
+        _ed, end_px = ends[end_ym]
+        _sd, start_px = ends[start_ym]
+        if start_px <= 0 or end_px <= 0:
+            continue
+        if _ed[:7] >= signal_month:
+            continue
+        scored.append((end_px / start_px - 1.0, c))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked = [c for _r, c in scored[: max(1, top_n)]]
+    if not picked:
+        picked = list(universe)
+    n = len(picked)
+    tw = {c: 1.0 / n for c in picked}
+    return picked, tw
+
+
+def _xs_momentum_pick(
+    universe: list[str],
+    prices: dict,
+    signal_month: str,
+    lookback: int,
+    top_n: int,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+) -> tuple[list[str], dict[str, float]]:
+    """Cross-sectional residual MOM: lookback ret − EW universe mean; top N. Guard universe < 5."""
+    if len(universe) < 5:
+        raise ValueError("XS 모멘텀은 유니버스 5종 이상이 필요합니다.")
+    end_ym = _shift_month(signal_month, -1)
+    start_ym = _shift_month(end_ym, -lookback)
+    scored_raw: list[tuple[float, str]] = []
+    for c in universe:
+        ends = month_ends_cache.get(c) or {}
+        if end_ym not in ends or start_ym not in ends:
+            continue
+        _ed, end_px = ends[end_ym]
+        _sd, start_px = ends[start_ym]
+        if start_px <= 0 or end_px <= 0:
+            continue
+        if _ed[:7] >= signal_month:
+            continue
+        scored_raw.append((end_px / start_px - 1.0, c))
+    if not scored_raw:
+        n = len(universe)
+        return list(universe), {c: 1.0 / n for c in universe}
+    mean_ret = sum(r for r, _c in scored_raw) / len(scored_raw)
+    scored = [(r - mean_ret, c) for r, c in scored_raw]
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    picked = [c for _r, c in scored[: max(1, top_n)]]
+    n = len(picked)
+    tw = {c: 1.0 / n for c in picked}
+    return picked, tw
+
+
+def _load_etf_flags() -> dict[str, dict]:
+    if not META.exists():
+        return {}
+    meta = json.loads(META.read_text(encoding="utf-8"))
+    out = {}
+    for e in meta.get("etfs") or []:
+        code = e.get("code")
+        if not code:
+            continue
+        out[str(code)] = {
+            "category": e.get("category") or "기타",
+            "leveraged": bool(e.get("leveraged")),
+        }
+    return out
+
+
+def _portfolio_trailing_vol_ann(
+    tw: dict[str, float],
+    prices: dict,
+    asof: str,
+    window: int = 60,
+) -> float | None:
+    """Annualized realized vol of fixed-weight sleeve from daily simple returns ending before asof."""
+    codes = [c for c, w in tw.items() if w > 0 and c in prices]
+    if not codes:
+        return None
+    total = sum(tw[c] for c in codes)
+    if total <= 0:
+        return None
+    norm = {c: tw[c] / total for c in codes}
+    date_sets = [set(d for d in prices[c] if d < asof) for c in codes]
+    common = sorted(set.intersection(*date_sets)) if date_sets else []
+    if len(common) < window + 1:
+        return None
+    use = common[-(window + 1) :]
+    rets: list[float] = []
+    for a, b in zip(use, use[1:]):
+        r = 0.0
+        ok = True
+        for c in codes:
+            pa, pb = prices[c][a], prices[c][b]
+            if pa <= 0 or pb <= 0:
+                ok = False
+                break
+            r += norm[c] * (pb / pa - 1.0)
+        if not ok:
+            return None
+        rets.append(r)
+    if len(rets) < 2:
+        return None
+    sig = statistics.stdev(rets)
+    if sig < 1e-15:
+        return None
+    return sig * (252 ** 0.5)
+
+
+def _apply_vol_target(
+    tw: dict[str, float],
+    prices: dict,
+    asof: str,
+    target_vol: float,
+    window: int,
+    cash_code: str,
+    etf_flags: dict[str, dict] | None = None,
+) -> dict[str, float]:
+    """Scale risky sleeve so trailing vol ≈ target; residual → cash. Cap scale ≤ 1. Drop leveraged."""
+    flags = etf_flags or {}
+    cash_w = float(tw.get(cash_code, 0.0))
+    risky: dict[str, float] = {}
+    dropped = 0.0
+    for c, w in tw.items():
+        if w <= 0:
+            continue
+        if c == cash_code:
+            continue
+        if flags.get(c, {}).get("leveraged"):
+            dropped += w
+            continue
+        risky[c] = w
+    # Dropped leveraged weight goes to cash
+    cash_w += dropped
+    if not risky:
+        return {cash_code: 1.0}
+    rsum = sum(risky.values())
+    # Renormalize risky to its current sleeve mass for vol estimate
+    risky_unit = {c: w / rsum for c, w in risky.items()}
+    port_vol = _portfolio_trailing_vol_ann(risky_unit, prices, asof, window)
+    if port_vol is None or port_vol <= 0:
+        scale = 1.0
+    else:
+        scale = min(1.0, float(target_vol) / port_vol)
+    out: dict[str, float] = {c: risky[c] * scale for c in risky}
+    used = sum(out.values())
+    out[cash_code] = max(0.0, 1.0 - used)
+    # Numerical clean
+    s = sum(out.values())
+    if s > 0:
+        out = {c: w / s for c, w in out.items() if w > 1e-15}
+    return out
+
+
+def _apply_sleeve_trend(
+    tw: dict[str, float],
+    signal_month: str,
+    month_ends_cache: dict[str, dict[str, tuple[str, float]]],
+    prices: dict,
+    asof: str,
+    cash_code: str,
+    mode: str,
+    lookback: int,
+    ma_window: int,
+    etf_flags: dict[str, dict] | None = None,
+) -> dict[str, float]:
+    """Per-category absolute momentum or MA ON/OFF; OFF sleeve → cash. Missing signal → OFF."""
+    flags = etf_flags or {}
+    # Group non-cash weights by category
+    sleeves: dict[str, dict[str, float]] = {}
+    cash_w = float(tw.get(cash_code, 0.0))
+    for c, w in tw.items():
+        if w <= 0:
+            continue
+        if c == cash_code:
+            continue
+        cat = flags.get(c, {}).get("category") or "기타"
+        sleeves.setdefault(cat, {})[c] = w
+
+    out: dict[str, float] = {}
+    for cat, members in sleeves.items():
+        if cat == "현금성":
+            for c, w in members.items():
+                out[c] = out.get(c, 0.0) + w
+            continue
+        on = False
+        if mode == "ma":
+            # Largest-weight member vs SMA (asof-prior closes only)
+            proxy = max(members.items(), key=lambda x: (x[1], x[0]))[0]
+            pm = prices.get(proxy) or {}
+            on = _ma_risk_on(pm, asof, ma_window) if pm else False
+        else:
+            # Absolute momentum: EW lookback return of sleeve > 0; any missing → OFF
+            rets = []
+            for c in members:
+                r = _lookback_return(c, signal_month, lookback, month_ends_cache)
+                if r is None:
+                    rets = []
+                    break
+                rets.append(r)
+            if rets:
+                on = (sum(rets) / len(rets)) > 0.0
+            else:
+                on = False
+        if on:
+            for c, w in members.items():
+                out[c] = out.get(c, 0.0) + w
+        else:
+            cash_w += sum(members.values())
+    out[cash_code] = out.get(cash_code, 0.0) + cash_w
+    s = sum(out.values())
+    if s <= 0:
+        return {cash_code: 1.0}
+    return {c: w / s for c, w in out.items() if w > 1e-15}
 
 
 def _trailing_vol(price_map: dict[str, float], asof: str, window: int = 60) -> float | None:
@@ -575,16 +807,31 @@ def backtest(
     gold_code: str | None = None,
     band_on: bool = False,
     band_pct: float = BAND_PCT_DEFAULT,
+    vol_target: bool = False,
+    vol_target_pct: float = 0.10,
+    vol_target_window: int = 60,
+    sleeve_trend: bool = False,
+    sleeve_trend_mode: str = "abs",
+    sleeve_trend_lookback: int = 1,
+    etf_flags: dict[str, dict] | None = None,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
         raise ValueError("empty")
     if initial_capital <= 0:
         raise ValueError("initial_capital must be positive")
-    if rebalance in ("MOM", "DMOM") and not codes:
+    if rebalance in ("MOM", "DMOM", "MOM12_1", "XSMOM") and not codes:
         raise ValueError("모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.")
+    if rebalance == "XSMOM" and len(codes) < 5:
+        raise ValueError("XS 모멘텀은 유니버스 5종 이상이 필요합니다.")
 
-    need_cash = rebalance == "DMOM" or ma_overlay
+    need_cash = (
+        rebalance == "DMOM"
+        or ma_overlay
+        or bool(vol_target)
+        or bool(sleeve_trend)
+        or (regime_hedge and regime_hedge_mode == "cash")
+    )
     if need_cash:
         if cash_code not in prices:
             raise ValueError(f"안전자산 {cash_code} 시세가 없습니다")
@@ -639,7 +886,7 @@ def backtest(
     vol_win = max(2, int(vol_window))
     ma_win = max(2, int(ma_window))
     use_inv = weighting == "invVol"
-    mom_like = rebalance in ("MOM", "DMOM")
+    mom_like = rebalance in ("MOM", "DMOM", "MOM12_1", "XSMOM")
     gold_lb = 3 if int(gold_lookback) >= 3 else 1
     gold_sleeve = _clamp_gold_sleeve(gold_sleeve_pct)
     # Band applies to fixed-target modes only; MOM/DMOM keep calendar monthly swaps.
@@ -653,11 +900,23 @@ def backtest(
         for extra in (gold_hold, GOLD_CASH):
             if extra not in month_ends_codes:
                 month_ends_codes.append(extra)
+    flags = etf_flags if etf_flags is not None else _load_etf_flags()
+    vt_on = bool(vol_target)
+    vt_pct = max(0.01, min(0.5, float(vol_target_pct)))
+    vt_win = max(5, int(vol_target_window) or 60)
+    st_on = bool(sleeve_trend)
+    st_mode = "ma" if sleeve_trend_mode == "ma" else "abs"
+    st_lb = 3 if int(sleeve_trend_lookback) >= 3 else 1
+
     month_ends_cache = (
         {c: _month_end_closes(prices[c]) for c in month_ends_codes}
-        if (mom_like or gold_on)
+        if (mom_like or gold_on or st_on)
         else {}
     )
+    if st_on:
+        for c in list(codes) + ([cash_code] if cash_code not in month_ends_codes else []):
+            if c not in month_ends_cache and c in prices:
+                month_ends_cache[c] = _month_end_closes(prices[c])
 
     units = None
     value = float(initial_capital)
@@ -690,6 +949,14 @@ def backtest(
             _picked, base = _momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache
             )
+        elif rebalance == "MOM12_1":
+            _picked, base = _momentum_pick_12_1(
+                codes, prices, d[:7], top_n, month_ends_cache
+            )
+        elif rebalance == "XSMOM":
+            _picked, base = _xs_momentum_pick(
+                codes, prices, d[:7], lookback, top_n, month_ends_cache
+            )
         elif rebalance == "DMOM":
             _picked, base = _dual_momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache, cash_code
@@ -715,6 +982,17 @@ def backtest(
             hedge_log.append({"date": d, "hedge": hedge_on})
             pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(regime_hedge_pct)))
             base = _apply_regime_hedge(base, hedge_on, hedge_code_res, pct)
+
+        if st_on:
+            base = _apply_sleeve_trend(
+                base, d[:7], month_ends_cache, prices, d, cash_code,
+                st_mode, st_lb, ma_win, flags,
+            )
+
+        if vt_on:
+            base = _apply_vol_target(
+                base, prices, d, vt_pct, vt_win, cash_code, flags,
+            )
 
         # GOLDON last so gold_hold weight stays exactly 0 or sleevePct (G1)
         gold_state = None
@@ -767,6 +1045,8 @@ def backtest(
                 do_rebal = True
             # GOLDON: month-start timing same as MOM
             if gold_on and _is_new_month(prev, d):
+                do_rebal = True
+            if (vt_on or st_on) and _is_new_month(prev, d):
                 do_rebal = True
             if monthly_contribution > 0 and _is_new_month(prev, d):
                 value += monthly_contribution
@@ -1109,10 +1389,18 @@ def _sensitivity_calendar_codes(
     regime_hedge_code: str = "114800",
     gold_on: bool = False,
     gold_code: str = "132030",
+    vol_target: bool = False,
+    sleeve_trend: bool = False,
 ) -> list[str]:
     """Codes whose intersection defines the common trading calendar (mirrors backtest)."""
     codes = [c for c, w in weights.items() if w and w > 0]
-    need_cash = rebalance == "DMOM" or ma_overlay or (regime_hedge and regime_hedge_mode == "cash")
+    need_cash = (
+        rebalance == "DMOM"
+        or ma_overlay
+        or (regime_hedge and regime_hedge_mode == "cash")
+        or bool(vol_target)
+        or bool(sleeve_trend)
+    )
     out = list(codes)
     if need_cash and cash_code not in out:
         out.append(cash_code)
@@ -1213,6 +1501,8 @@ def start_date_sensitivity(
         regime_hedge_code=bt_kwargs.get("regime_hedge_code", "114800"),
         gold_on=bool(bt_kwargs.get("gold_on", False)),
         gold_code=bt_kwargs.get("gold_code", "132030"),
+        vol_target=bool(bt_kwargs.get("vol_target", False)),
+        sleeve_trend=bool(bt_kwargs.get("sleeve_trend", False)),
     )
     missing = [c for c in cal if c not in prices]
     if missing:

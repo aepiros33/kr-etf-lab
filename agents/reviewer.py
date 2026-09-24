@@ -910,6 +910,74 @@ def main():
         if changes > 0:
             fail("MOM turnover cost should change path when holdings switch")
 
+    # --- MOM12_1 / XSMOM / volTarget / sleeveTrend smoke ---
+    uni5 = {
+        "069500": 0.2,
+        "133690": 0.2,
+        "148070": 0.2,
+        "132030": 0.2,
+        "153130": 0.2,
+    }
+    m12 = backtest(uni5, prices, start="2019-01-01", rebalance="MOM12_1", mom_top_n=2, mom_cost=0.0)
+    if not m12.curve or len(m12.curve) < 20:
+        fail("MOM12_1 curve too short")
+    if not m12.mom_holdings:
+        fail("MOM12_1 should return monthly holdings")
+    for h in m12.mom_holdings:
+        if len(h.get("codes") or []) > 2:
+            fail(f"MOM12_1 topN violated: {h}")
+    xs = backtest(uni5, prices, start="2019-01-01", rebalance="XSMOM", mom_lookback=1, mom_top_n=2, mom_cost=0.0)
+    if not xs.curve or len(xs.curve) < 20:
+        fail("XSMOM curve too short")
+    if not xs.mom_holdings:
+        fail("XSMOM should return monthly holdings")
+    try:
+        backtest({"069500": 0.5, "133690": 0.5}, prices, start="2019-01-01", rebalance="XSMOM")
+        fail("XSMOM should reject universe < 5")
+    except ValueError as e:
+        if "5" not in str(e):
+            fail(f"XSMOM guard message unexpected: {e}")
+
+    vt = backtest(
+        {"069500": 0.6, "148070": 0.4},
+        prices,
+        start="2019-01-01",
+        rebalance="Q",
+        vol_target=True,
+        vol_target_pct=0.10,
+        vol_target_window=60,
+        cash_code="153130",
+    )
+    if not vt.curve or len(vt.curve) < 20:
+        fail("volTarget curve too short")
+    if vt.mdd > 1e-12:
+        fail(f"volTarget MDD > 0: {vt.mdd}")
+
+    st = backtest(
+        {"069500": 0.4, "133690": 0.3, "148070": 0.3},
+        prices,
+        start="2019-01-01",
+        rebalance="M",
+        sleeve_trend=True,
+        sleeve_trend_mode="abs",
+        sleeve_trend_lookback=1,
+        cash_code="153130",
+    )
+    if not st.curve or len(st.curve) < 20:
+        fail("sleeveTrend curve too short")
+    if st.mdd > 1e-12:
+        fail(f"sleeveTrend MDD > 0: {st.mdd}")
+
+    app_js_chk = (ROOT / "app.js").read_text(encoding="utf-8")
+    for needle in ("MOM12_1", "XSMOM", "volTarget", "sleeveTrend", "momentumPick12_1", "xsMomentumPick"):
+        if needle not in app_js_chk:
+            fail(f"JS parity needle missing: {needle}")
+    idx_chk = (ROOT / "index.html").read_text(encoding="utf-8")
+    if "MOM12_1" not in idx_chk or "XSMOM" not in idx_chk:
+        fail("new rebalance modes missing from index.html")
+    if 'id="volTarget"' not in idx_chk or 'id="sleeveTrend"' not in idx_chk:
+        fail("volTarget/sleeveTrend toggles missing from index.html")
+
     # Price-return disclosure (no invented TR): UI must state price-return basis
     idx = (ROOT / "index.html").read_text(encoding="utf-8")
     app_js = (ROOT / "app.js").read_text(encoding="utf-8")

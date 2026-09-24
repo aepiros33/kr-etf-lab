@@ -159,6 +159,14 @@ const state = {
   goldCode: "132030", // 411060 spot | 132030 futures long (default long for 10y)
   bandOn: false,
   bandPct: 0.05, // UI 1–10%, default 5%
+  /** Vol target overlay: scale risky sleeve to trailing vol ≈ target; residual → cash. */
+  volTarget: false,
+  volTargetPct: 0.10, // annualized, UI 5–20%
+  volTargetWindow: 60,
+  /** Sleeve trend: per-category abs mom / MA ON-OFF; OFF → cash. */
+  sleeveTrend: false,
+  sleeveTrendMode: "abs", // abs | ma
+  sleeveTrendLookback: 1, // 1|3 for abs
   /** Trading cost rate (fraction of one-way turnover). Default 0.1% = legacy MOM. */
   tradeCost: 0.001,
   chart: null,
@@ -391,7 +399,12 @@ function encodeShareParams() {
     if (e) p.set("pe", e);
   }
   p.set("rb", state.rebalance || "Q");
-  if (state.rebalance === "MOM" || state.rebalance === "DMOM") {
+  if (
+    state.rebalance === "MOM" ||
+    state.rebalance === "DMOM" ||
+    state.rebalance === "MOM12_1" ||
+    state.rebalance === "XSMOM"
+  ) {
     p.set("lb", String(state.momLookback || 1));
     p.set("tn", String(state.momTopN || 3));
   }
@@ -400,8 +413,24 @@ function encodeShareParams() {
     p.set("ma", "1");
     p.set("mw", String(state.maWindow || 200));
   }
-  if (state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")) {
+  if (
+    state.rebalance === "DMOM" ||
+    state.maOverlay ||
+    (state.regimeHedge && state.regimeHedgeMode === "cash") ||
+    state.volTarget ||
+    state.sleeveTrend
+  ) {
     p.set("cash", state.cashCode || "153130");
+  }
+  if (state.volTarget) {
+    p.set("vt", "1");
+    p.set("vtp", String(Math.round((Number(state.volTargetPct) || 0.1) * 100)));
+    p.set("vtw", String(state.volTargetWindow || 60));
+  }
+  if (state.sleeveTrend) {
+    p.set("st", "1");
+    p.set("stm", state.sleeveTrendMode === "ma" ? "ma" : "abs");
+    p.set("stlb", String(state.sleeveTrendLookback || 1));
   }
   if (state.regimeHedge) {
     p.set("rh", "1");
@@ -502,6 +531,20 @@ function syncControlsFromState() {
   setVal("bandPct", String(Math.round(clampBandPct(state.bandPct) * 100)));
   const bandRow = $("#bandRow");
   if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
+  setChk("volTarget", state.volTarget);
+  setVal("volTargetPct", String(Math.round((Number(state.volTargetPct) || 0.1) * 100)));
+  setVal("volTargetWindow", String(state.volTargetWindow || 60));
+  const vtRow = $("#volTargetRow");
+  if (vtRow) vtRow.style.display = state.volTarget ? "flex" : "none";
+  const vtHint = $("#volTargetHint");
+  if (vtHint) vtHint.style.display = state.volTarget ? "block" : "none";
+  setChk("sleeveTrend", state.sleeveTrend);
+  setVal("sleeveTrendMode", state.sleeveTrendMode === "ma" ? "ma" : "abs");
+  setVal("sleeveTrendLookback", String(state.sleeveTrendLookback || 1));
+  const stRow = $("#sleeveTrendRow");
+  if (stRow) stRow.style.display = state.sleeveTrend ? "flex" : "none";
+  const stHint = $("#sleeveTrendHint");
+  if (stHint) stHint.style.display = state.sleeveTrend ? "block" : "none";
   const tcEl = $("#tradeCost");
   if (tcEl) tcEl.value = String(Math.round(clampTradeCost(state.tradeCost) * 10000));
   updateTradeCostLabel();
@@ -565,7 +608,7 @@ async function applyShareParams(params) {
     if (params.get("pe") && $("#endDate")) $("#endDate").value = params.get("pe");
   }
   const rb = params.get("rb");
-  if (rb && ["Q", "Y", "M", "MOM", "DMOM", "N"].includes(rb)) state.rebalance = rb;
+  if (rb && ["Q", "Y", "M", "MOM", "MOM12_1", "XSMOM", "DMOM", "N"].includes(rb)) state.rebalance = rb;
   if (params.get("lb")) state.momLookback = Number(params.get("lb")) >= 3 ? 3 : 1;
   if (params.get("tn")) state.momTopN = Math.max(1, Math.min(20, Number(params.get("tn")) || 3));
   state.weighting = params.get("w") === "invVol" ? "invVol" : "fixed";
@@ -587,6 +630,18 @@ async function applyShareParams(params) {
     const v = Number(params.get("bp"));
     state.bandPct = clampBandPct(Number.isFinite(v) ? v / 100 : BAND_PCT_DEFAULT);
   }
+  state.volTarget = params.get("vt") === "1";
+  if (params.get("vtp")) {
+    const v = Number(params.get("vtp"));
+    state.volTargetPct = Math.max(0.01, Math.min(0.5, Number.isFinite(v) ? v / 100 : 0.1));
+  }
+  if (params.get("vtw")) {
+    const v = Number(params.get("vtw"));
+    state.volTargetWindow = Math.max(5, Math.min(252, Number.isFinite(v) ? v : 60));
+  }
+  state.sleeveTrend = params.get("st") === "1";
+  if (params.get("stm")) state.sleeveTrendMode = params.get("stm") === "ma" ? "ma" : "abs";
+  if (params.get("stlb")) state.sleeveTrendLookback = Number(params.get("stlb")) >= 3 ? 3 : 1;
   if (params.get("tc") != null && params.get("tc") !== "") {
     const bps = Number(params.get("tc"));
     state.tradeCost = clampTradeCost(Number.isFinite(bps) ? bps / 10000 : TRADE_COST_DEFAULT);
@@ -907,11 +962,20 @@ async function boot() {
     const momRow = $("#momControls");
     if (momRow)
       momRow.style.display =
-        state.rebalance === "MOM" || state.rebalance === "DMOM" ? "flex" : "none";
+        state.rebalance === "MOM" ||
+        state.rebalance === "DMOM" ||
+        state.rebalance === "MOM12_1" ||
+        state.rebalance === "XSMOM"
+          ? "flex"
+          : "none";
     const cashRow = $("#dmomCashRow");
     if (cashRow)
       cashRow.style.display =
-        state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")
+        state.rebalance === "DMOM" ||
+        state.maOverlay ||
+        (state.regimeHedge && state.regimeHedgeMode === "cash") ||
+        state.volTarget ||
+        state.sleeveTrend
           ? "flex"
           : "none";
     await run();
@@ -1120,10 +1184,6 @@ function glanceColor(code) {
   for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) >>> 0;
   const hue = h % 360;
   return `hsl(${hue} 55% 55%)`;
-}
-
-function etfByCode(code) {
-  return (state.meta && state.meta.etfs ? state.meta.etfs : []).find((e) => e.code === code) || null;
 }
 
 function renderSelGlance() {
@@ -1493,7 +1553,12 @@ async function run() {
   const picks = Object.entries(state.selected).filter(([, w]) => w > 0);
   if (!picks.length) return;
   const codes = picks.map(([c]) => c);
-  const needCash = state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash");
+  const needCash =
+    state.rebalance === "DMOM" ||
+    state.maOverlay ||
+    (state.regimeHedge && state.regimeHedgeMode === "cash") ||
+    state.volTarget ||
+    state.sleeveTrend;
   const needHedge = !!state.regimeHedge;
   const needGold = !!state.goldOn;
   const extra = [BENCH];
@@ -1575,8 +1640,18 @@ async function run() {
   const priceMap = useTr
     ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
-  if ((state.rebalance === "MOM" || state.rebalance === "DMOM") && !picks.length) {
+  if (
+    (state.rebalance === "MOM" ||
+      state.rebalance === "DMOM" ||
+      state.rebalance === "MOM12_1" ||
+      state.rebalance === "XSMOM") &&
+    !picks.length
+  ) {
     $("#result").innerHTML = `<div class="card pad empty">모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.</div>`;
+    return;
+  }
+  if (state.rebalance === "XSMOM" && picks.length < 5) {
+    $("#result").innerHTML = `<div class="card pad empty">XS 모멘텀은 유니버스 5종 이상이 필요합니다.</div>`;
     return;
   }
   const result = backtest(
@@ -1607,6 +1682,13 @@ async function run() {
       goldCode: resolveGoldCode(state.goldCode),
       bandOn: !!state.bandOn,
       bandPct: clampBandPct(state.bandPct),
+      volTarget: !!state.volTarget,
+      volTargetPct: Math.max(0.01, Math.min(0.5, Number(state.volTargetPct) || 0.1)),
+      volTargetWindow: Math.max(5, Number(state.volTargetWindow) || 60),
+      sleeveTrend: !!state.sleeveTrend,
+      sleeveTrendMode: state.sleeveTrendMode === "ma" ? "ma" : "abs",
+      sleeveTrendLookback: Number(state.sleeveTrendLookback) >= 3 ? 3 : 1,
+      etfFlags: etfFlagsMap(),
     }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
@@ -1737,6 +1819,189 @@ function dualMomentumPick(universe, priceMap, signalMonth, lookback, topN, month
   const tw = {};
   for (const c of slots) tw[c] = (tw[c] || 0) + 1 / n;
   return [Object.keys(tw), tw];
+}
+
+
+function momentumPick12_1(universe, priceMap, signalMonth, topN, monthEndsCache) {
+  // 12-1: 12m return ending at prior-prior month-end (skip most recent 1m). No lookahead.
+  const endYm = shiftMonth(signalMonth, -2);
+  const startYm = shiftMonth(endYm, -12);
+  const scored = [];
+  for (const c of universe) {
+    const ends = monthEndsCache[c] || {};
+    if (!ends[endYm] || !ends[startYm]) continue;
+    const [ed, endPx] = ends[endYm];
+    const [, startPx] = ends[startYm];
+    if (!(startPx > 0) || !(endPx > 0)) continue;
+    if (ed.slice(0, 7) >= signalMonth) continue;
+    scored.push([endPx / startPx - 1, c]);
+  }
+  scored.sort((a, b) => b[0] - a[0] || (a[1] < b[1] ? -1 : 1));
+  let picked = scored.slice(0, Math.max(1, topN)).map((x) => x[1]);
+  if (!picked.length) picked = [...universe];
+  const n = picked.length;
+  const tw = Object.fromEntries(picked.map((c) => [c, 1 / n]));
+  return [picked, tw];
+}
+
+function xsMomentumPick(universe, priceMap, signalMonth, lookback, topN, monthEndsCache) {
+  if (universe.length < 5) {
+    throw new Error("XS 모멘텀은 유니버스 5종 이상이 필요합니다.");
+  }
+  const endYm = shiftMonth(signalMonth, -1);
+  const startYm = shiftMonth(endYm, -lookback);
+  const scoredRaw = [];
+  for (const c of universe) {
+    const ends = monthEndsCache[c] || {};
+    if (!ends[endYm] || !ends[startYm]) continue;
+    const [ed, endPx] = ends[endYm];
+    const [, startPx] = ends[startYm];
+    if (!(startPx > 0) || !(endPx > 0)) continue;
+    if (ed.slice(0, 7) >= signalMonth) continue;
+    scoredRaw.push([endPx / startPx - 1, c]);
+  }
+  if (!scoredRaw.length) {
+    const n = universe.length;
+    return [universe.slice(), Object.fromEntries(universe.map((c) => [c, 1 / n]))];
+  }
+  const meanRet = scoredRaw.reduce((s, x) => s + x[0], 0) / scoredRaw.length;
+  const scored = scoredRaw.map(([r, c]) => [r - meanRet, c]);
+  scored.sort((a, b) => b[0] - a[0] || (a[1] < b[1] ? -1 : 1));
+  const picked = scored.slice(0, Math.max(1, topN)).map((x) => x[1]);
+  const n = picked.length;
+  return [picked, Object.fromEntries(picked.map((c) => [c, 1 / n]))];
+}
+
+function etfFlagsMap() {
+  const out = {};
+  const list = (state.meta && state.meta.etfs) || [];
+  for (const e of list) {
+    out[e.code] = { category: e.category || "기타", leveraged: !!e.leveraged };
+  }
+  return out;
+}
+
+function portfolioTrailingVolAnn(tw, priceMap, asof, window = 60) {
+  const codes = Object.keys(tw).filter((c) => tw[c] > 0 && priceMap[c]);
+  if (!codes.length) return null;
+  const total = codes.reduce((s, c) => s + tw[c], 0);
+  if (!(total > 0)) return null;
+  const norm = Object.fromEntries(codes.map((c) => [c, tw[c] / total]));
+  let dates = Object.keys(priceMap[codes[0]])
+    .filter((d) => d < asof)
+    .sort();
+  for (const c of codes.slice(1)) {
+    const set = new Set(Object.keys(priceMap[c]));
+    dates = dates.filter((d) => set.has(d));
+  }
+  if (dates.length < window + 1) return null;
+  const use = dates.slice(-(window + 1));
+  const rets = [];
+  for (let i = 1; i < use.length; i++) {
+    let r = 0;
+    for (const c of codes) {
+      const pa = priceMap[c][use[i - 1]];
+      const pb = priceMap[c][use[i]];
+      if (!(pa > 0) || !(pb > 0)) return null;
+      r += norm[c] * (pb / pa - 1);
+    }
+    rets.push(r);
+  }
+  if (rets.length < 2) return null;
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1);
+  const sig = Math.sqrt(variance);
+  if (!(sig > 1e-15)) return null;
+  return sig * Math.sqrt(252);
+}
+
+function applyVolTarget(tw, priceMap, asof, targetVol, window, cashCode, flags) {
+  const fl = flags || {};
+  let cashW = tw[cashCode] || 0;
+  const risky = {};
+  let dropped = 0;
+  for (const [c, w] of Object.entries(tw)) {
+    if (!(w > 0)) continue;
+    if (c === cashCode) continue;
+    if (fl[c] && fl[c].leveraged) {
+      dropped += w;
+      continue;
+    }
+    risky[c] = w;
+  }
+  cashW += dropped;
+  const rKeys = Object.keys(risky);
+  if (!rKeys.length) return { [cashCode]: 1 };
+  const rsum = rKeys.reduce((s, c) => s + risky[c], 0);
+  const riskyUnit = Object.fromEntries(rKeys.map((c) => [c, risky[c] / rsum]));
+  const portVol = portfolioTrailingVolAnn(riskyUnit, priceMap, asof, window);
+  const scale =
+    portVol == null || !(portVol > 0) ? 1 : Math.min(1, Number(targetVol) / portVol);
+  const out = {};
+  for (const c of rKeys) out[c] = risky[c] * scale;
+  const used = Object.values(out).reduce((a, b) => a + b, 0);
+  out[cashCode] = Math.max(0, 1 - used);
+  const s = Object.values(out).reduce((a, b) => a + b, 0);
+  if (!(s > 0)) return { [cashCode]: 1 };
+  return Object.fromEntries(Object.entries(out).filter(([, w]) => w > 1e-15).map(([c, w]) => [c, w / s]));
+}
+
+function applySleeveTrend(
+  tw,
+  signalMonth,
+  monthEndsCache,
+  priceMap,
+  asof,
+  cashCode,
+  mode,
+  lookback,
+  maWindow,
+  flags
+) {
+  const fl = flags || {};
+  const sleeves = {};
+  let cashW = tw[cashCode] || 0;
+  for (const [c, w] of Object.entries(tw)) {
+    if (!(w > 0)) continue;
+    if (c === cashCode) continue;
+    const cat = (fl[c] && fl[c].category) || "기타";
+    if (!sleeves[cat]) sleeves[cat] = {};
+    sleeves[cat][c] = w;
+  }
+  const out = {};
+  for (const [cat, members] of Object.entries(sleeves)) {
+    if (cat === "현금성") {
+      for (const [c, w] of Object.entries(members)) out[c] = (out[c] || 0) + w;
+      continue;
+    }
+    let on = false;
+    if (mode === "ma") {
+      const proxy = Object.entries(members).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
+      const pm = priceMap[proxy];
+      on = pm ? maRiskOn(pm, asof, maWindow) : false;
+    } else {
+      const rets = [];
+      let ok = true;
+      for (const c of Object.keys(members)) {
+        const r = lookbackReturn(c, signalMonth, lookback, monthEndsCache);
+        if (r == null) {
+          ok = false;
+          break;
+        }
+        rets.push(r);
+      }
+      on = ok && rets.length ? rets.reduce((a, b) => a + b, 0) / rets.length > 0 : false;
+    }
+    if (on) {
+      for (const [c, w] of Object.entries(members)) out[c] = (out[c] || 0) + w;
+    } else {
+      cashW += Object.values(members).reduce((a, b) => a + b, 0);
+    }
+  }
+  out[cashCode] = (out[cashCode] || 0) + cashW;
+  const s = Object.values(out).reduce((a, b) => a + b, 0);
+  if (!(s > 0)) return { [cashCode]: 1 };
+  return Object.fromEntries(Object.entries(out).filter(([, w]) => w > 1e-15).map(([c, w]) => [c, w / s]));
 }
 
 function trailingVol(priceMap, asof, window = 60) {
@@ -2003,6 +2268,9 @@ function backtest(
 ) {
   const codes = Object.keys(weights).filter((c) => weights[c] > 0);
   if (!codes.length) return { error: "ETF를 선택하세요." };
+  if (rebalance === "XSMOM" && codes.length < 5) {
+    return { error: "XS 모멘텀은 유니버스 5종 이상이 필요합니다." };
+  }
   const total = codes.reduce((s, c) => s + weights[c], 0);
   const tw = Object.fromEntries(codes.map((c) => [c, weights[c] / total]));
 
@@ -2034,11 +2302,27 @@ function backtest(
       return { error: e.message || String(e) };
     }
   }
-  const momLike = rebalance === "MOM" || rebalance === "DMOM";
-  // Band: fixed-target modes only; MOM/DMOM keep monthly calendar swaps.
+  const volTargetOn = !!opts.volTarget;
+  const volTargetPct = Math.max(0.01, Math.min(0.5, Number(opts.volTargetPct) || 0.1));
+  const volTargetWindow = Math.max(5, Number(opts.volTargetWindow) || 60);
+  const sleeveTrendOn = !!opts.sleeveTrend;
+  const sleeveTrendMode = opts.sleeveTrendMode === "ma" ? "ma" : "abs";
+  const sleeveTrendLb = Number(opts.sleeveTrendLookback) >= 3 ? 3 : 1;
+  const etfFlags = opts.etfFlags || etfFlagsMap();
+  const momLike =
+    rebalance === "MOM" ||
+    rebalance === "DMOM" ||
+    rebalance === "MOM12_1" ||
+    rebalance === "XSMOM";
+  // Band: fixed-target modes only; MOM-like keep monthly calendar swaps.
   const bandActive = bandOnOpt && !momLike;
   const bandPctC = bandActive ? clampBandPct(opts.bandPct) : 0;
-  const needCash = rebalance === "DMOM" || maOverlay || (regimeHedge && regimeHedgeMode === "cash");
+  const needCash =
+    rebalance === "DMOM" ||
+    maOverlay ||
+    (regimeHedge && regimeHedgeMode === "cash") ||
+    volTargetOn ||
+    sleeveTrendOn;
 
   if (needCash && !priceMap[cashCode]) {
     return { error: `안전자산 ${cashCode} 시세가 없습니다.` };
@@ -2088,10 +2372,15 @@ function backtest(
       if (!monthEndsCodes.includes(extra)) monthEndsCodes.push(extra);
     }
   }
-  const monthEndsCache =
-    momLike || goldOn
+  let monthEndsCache =
+    momLike || goldOn || sleeveTrendOn
       ? Object.fromEntries(monthEndsCodes.map((c) => [c, monthEndCloses(priceMap[c])]))
       : {};
+  if (sleeveTrendOn) {
+    for (const c of [...codes, cashCode]) {
+      if (!monthEndsCache[c] && priceMap[c]) monthEndsCache[c] = monthEndCloses(priceMap[c]);
+    }
+  }
 
   const q = (m) => Math.floor((Number(m) - 1) / 3);
   const isRebal = (prev, cur) => {
@@ -2100,7 +2389,13 @@ function backtest(
     const [py, pm] = prev.split("-"),
       [cy, cm] = cur.split("-");
     if (rebalance === "Y") return py !== cy;
-    if (rebalance === "M" || rebalance === "MOM" || rebalance === "DMOM")
+    if (
+      rebalance === "M" ||
+      rebalance === "MOM" ||
+      rebalance === "DMOM" ||
+      rebalance === "MOM12_1" ||
+      rebalance === "XSMOM"
+    )
       return prev.slice(0, 7) !== cur.slice(0, 7);
     return py !== cy || q(pm) !== q(cm);
   };
@@ -2135,6 +2430,10 @@ function backtest(
     let base;
     if (rebalance === "MOM") {
       [, base] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
+    } else if (rebalance === "MOM12_1") {
+      [, base] = momentumPick12_1(codes, priceMap, d.slice(0, 7), topN, monthEndsCache);
+    } else if (rebalance === "XSMOM") {
+      [, base] = xsMomentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
     } else if (rebalance === "DMOM") {
       [, base] = dualMomentumPick(
         codes,
@@ -2162,6 +2461,31 @@ function backtest(
       lastHedge = hedgeOn;
       hedgeLog.push({ date: d, hedge: hedgeOn });
       base = applyRegimeHedge(base, hedgeOn, hedgeCodeRes, regimeHedgePct);
+    }
+    if (sleeveTrendOn) {
+      base = applySleeveTrend(
+        base,
+        d.slice(0, 7),
+        monthEndsCache,
+        priceMap,
+        d,
+        cashCode,
+        sleeveTrendMode,
+        sleeveTrendLb,
+        maWindow,
+        etfFlags
+      );
+    }
+    if (volTargetOn) {
+      base = applyVolTarget(
+        base,
+        priceMap,
+        d,
+        volTargetPct,
+        volTargetWindow,
+        cashCode,
+        etfFlags
+      );
     }
     // GOLDON last so goldHold weight stays exactly 0 or sleevePct (G1)
     let goldState = null;
@@ -2204,6 +2528,7 @@ function backtest(
       let doRebal = bandActive ? false : isRebal(prev, d);
       if (regimeHedge && isNewMonth(prev, d)) doRebal = true;
       if (goldOn && isNewMonth(prev, d)) doRebal = true;
+      if ((volTargetOn || sleeveTrendOn) && isNewMonth(prev, d)) doRebal = true;
       if (monthlyContribution > 0 && isNewMonth(prev, d)) {
         value += monthlyContribution;
         totalInvested += monthlyContribution;
@@ -2492,7 +2817,9 @@ function sensitivityCalendarCodes(weights, cfg) {
   const needCash =
     rebalance === "DMOM" ||
     !!cfg.maOverlay ||
-    (!!cfg.regimeHedge && cfg.regimeHedgeMode === "cash");
+    (!!cfg.regimeHedge && cfg.regimeHedgeMode === "cash") ||
+    !!cfg.volTarget ||
+    !!cfg.sleeveTrend;
   const out = [...codes];
   if (needCash && !out.includes(cashCode)) out.push(cashCode);
   if (cfg.regimeHedge) {
@@ -3023,6 +3350,13 @@ function buildSensitivityOptsFromState() {
     goldCode: resolveGoldCode(state.goldCode),
     bandOn: !!state.bandOn,
     bandPct: clampBandPct(state.bandPct),
+    volTarget: !!state.volTarget,
+    volTargetPct: Math.max(0.01, Math.min(0.5, Number(state.volTargetPct) || 0.1)),
+    volTargetWindow: Math.max(5, Number(state.volTargetWindow) || 60),
+    sleeveTrend: !!state.sleeveTrend,
+    sleeveTrendMode: state.sleeveTrendMode === "ma" ? "ma" : "abs",
+    sleeveTrendLookback: Number(state.sleeveTrendLookback) >= 3 ? 3 : 1,
+    etfFlags: etfFlagsMap(),
   };
 }
 
@@ -3195,10 +3529,23 @@ function renderMomHoldings(rows) {
     })
     .join("");
   const dual = state.rebalance === "DMOM";
-  const title = dual ? "듀얼 모멘텀" : "모멘텀";
+  const title =
+    state.rebalance === "DMOM"
+      ? "듀얼 모멘텀"
+      : state.rebalance === "MOM12_1"
+        ? "12-1 스킵 모멘텀"
+        : state.rebalance === "XSMOM"
+          ? "XS 잔차 모멘텀"
+          : "모멘텀";
+  const scoreNote =
+    state.rebalance === "MOM12_1"
+      ? "최근 1개월 제외 12개월 수익률"
+      : state.rebalance === "XSMOM"
+        ? `룩백 ${state.momLookback}개월 수익률 − 유니버스 평균`
+        : `전월 말 기준 ${state.momLookback}개월 수익률`;
   return `<div class="card pad" id="momHoldings"><div class="section-title">월간 편입 표 (${title} · 최근 ${slice.length}개월)</div>
     <table><thead><tr><th>월</th><th>코드</th><th>종목 · 비중</th></tr></thead><tbody>${body}</tbody></table>
-    <div class="warn">편입은 전월 말 기준 ${state.momLookback}개월 수익률 상위 ${state.momTopN}${dual ? " · 절대모멘텀(안전자산 대비) 필터" : ""} · 교체 회전(TO)에 거래비용 적용 · 당월 성과는 순위 산정에 쓰지 않음</div>
+    <div class="warn">편입은 ${scoreNote} 상위 ${state.momTopN}${dual ? " · 절대모멘텀(안전자산 대비) 필터" : ""} · 교체 회전(TO)에 거래비용 적용 · 당월 성과는 순위 산정에 쓰지 않음</div>
   </div>`;
 }
 
@@ -3226,6 +3573,12 @@ function currentStrategyCfg() {
     goldCode: resolveGoldCode(state.goldCode),
     bandOn: !!state.bandOn,
     bandPct: clampBandPct(state.bandPct),
+    volTarget: !!state.volTarget,
+    volTargetPct: Math.max(0.01, Math.min(0.5, Number(state.volTargetPct) || 0.1)),
+    volTargetWindow: Math.max(5, Number(state.volTargetWindow) || 60),
+    sleeveTrend: !!state.sleeveTrend,
+    sleeveTrendMode: state.sleeveTrendMode === "ma" ? "ma" : "abs",
+    sleeveTrendLookback: Number(state.sleeveTrendLookback) >= 3 ? 3 : 1,
     tradeCost: clampTradeCost(state.tradeCost),
     dcaOn: state.dcaOn,
     initialCapital: state.initialCapital,
@@ -3321,7 +3674,9 @@ async function executePortBacktest(picks, start, end, cfg) {
   const needCash =
     cfg.rebalance === "DMOM" ||
     cfg.maOverlay ||
-    (cfg.regimeHedge && cfg.regimeHedgeMode === "cash");
+    (cfg.regimeHedge && cfg.regimeHedgeMode === "cash") ||
+    !!cfg.volTarget ||
+    !!cfg.sleeveTrend;
   const needHedge = !!cfg.regimeHedge;
   const needGold = !!cfg.goldOn;
   const extra = [BENCH];
@@ -3379,6 +3734,13 @@ async function executePortBacktest(picks, start, end, cfg) {
     goldCode: resolveGoldCode(cfg.goldCode),
     bandOn: !!cfg.bandOn,
     bandPct: clampBandPct(cfg.bandPct),
+    volTarget: !!cfg.volTarget,
+    volTargetPct: Math.max(0.01, Math.min(0.5, Number(cfg.volTargetPct) || 0.1)),
+    volTargetWindow: Math.max(5, Number(cfg.volTargetWindow) || 60),
+    sleeveTrend: !!cfg.sleeveTrend,
+    sleeveTrendMode: cfg.sleeveTrendMode === "ma" ? "ma" : "abs",
+    sleeveTrendLookback: Number(cfg.sleeveTrendLookback) >= 3 ? 3 : 1,
+    etfFlags: etfFlagsMap(),
   });
 }
 
@@ -3765,14 +4127,21 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
     state.weighting === "invVol"
       ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
       : "";
+  const volTargetNote = state.volTarget
+    ? `<div class="warn">변동성 타깃 · 목표 ${(Math.max(0.01, Math.min(0.5, Number(state.volTargetPct) || 0.1)) * 100).toFixed(0)}% · 룩백 ${state.volTargetWindow || 60}거래일 · 스케일≤100% · 레버리지/인버스 제외 · 잔여 ${state.cashCode || "153130"} · 과거 시뮬</div>`
+    : "";
+  const sleeveTrendNote = state.sleeveTrend
+    ? `<div class="warn">슬리브 추세 · 신호 ${state.sleeveTrendMode === "ma" ? "이동평균" : "절대모멘텀"} · 룩백 ${state.sleeveTrendLookback}개월 · OFF→안전자산 · 결측=OFF · 과거 시뮬</div>`
+    : "";
   const bandNote = r.bandApplied
+
     ? `<div class="warn">리밸런싱 밴드 · ±${(Number(r.bandPct) * 100).toFixed(0)}% · 리밸런싱 ${r.rebalCount != null ? r.rebalCount : "—"}회 · Q/Y/M 캘린더 무시·매일 드리프트 검사 · MOM/DMOM에는 미적용 · 과거 시뮬</div>`
     : r.rebalCount != null && state.rebalance !== "N"
       ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})</div>`
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}${portLineHtml(picks)}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}${portLineHtml(picks)}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${volTargetNote}${sleeveTrendNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -3890,21 +4259,38 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#customDates").style.display = e.target.value === "custom" ? "flex" : "none";
   };
   const syncMomControls = () => {
-    const on = state.rebalance === "MOM" || state.rebalance === "DMOM";
+    const on =
+      state.rebalance === "MOM" ||
+      state.rebalance === "DMOM" ||
+      state.rebalance === "MOM12_1" ||
+      state.rebalance === "XSMOM";
     const row = $("#momControls");
     if (row) row.style.display = on ? "flex" : "none";
     const hint = $("#momHint");
     if (hint) {
       hint.style.display = on ? "block" : "none";
-      hint.textContent =
-        state.rebalance === "DMOM"
-          ? "선택한 ETF가 듀얼 모멘텀 유니버스입니다. 상대 모멘텀 상위 N 후 안전자산 대비 절대 필터 · 교체 회전(TO)에 거래비용 슬라이더 적용."
-          : "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 회전(TO)에 거래비용 슬라이더 적용.";
+      if (state.rebalance === "DMOM") {
+        hint.textContent =
+          "선택한 ETF가 듀얼 모멘텀 유니버스입니다. 상대 모멘텀 상위 N 후 안전자산 대비 절대 필터 · 교체 회전(TO)에 거래비용 슬라이더 적용.";
+      } else if (state.rebalance === "MOM12_1") {
+        hint.textContent =
+          "12-1 스킵 모멘텀: 전월 말 신호 · 최근 1개월을 뺀 12개월 수익률 상위 N 동일비중 · 룩어헤드 없음 · 거래비용 슬라이더 적용.";
+      } else if (state.rebalance === "XSMOM") {
+        hint.textContent =
+          "XS 잔차 모멘텀: 전월 말 룩백 수익률 − 유니버스 평균 · 상위 N · 유니버스 5종 미만이면 실행하지 않음 · 거래비용 슬라이더 적용.";
+      } else {
+        hint.textContent =
+          "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 회전(TO)에 거래비용 슬라이더 적용.";
+      }
     }
     const cashRow = $("#dmomCashRow");
     if (cashRow)
       cashRow.style.display =
-        state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")
+        state.rebalance === "DMOM" ||
+        state.maOverlay ||
+        (state.regimeHedge && state.regimeHedgeMode === "cash") ||
+        state.volTarget ||
+        state.sleeveTrend
           ? "flex"
           : "none";
   };
@@ -3917,13 +4303,25 @@ document.addEventListener("DOMContentLoaded", () => {
     if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
     const bandRow = $("#bandRow");
     if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
+    const vtRow = $("#volTargetRow");
+    if (vtRow) vtRow.style.display = state.volTarget ? "flex" : "none";
+    const vtHint = $("#volTargetHint");
+    if (vtHint) vtHint.style.display = state.volTarget ? "block" : "none";
+    const stRow = $("#sleeveTrendRow");
+    if (stRow) stRow.style.display = state.sleeveTrend ? "flex" : "none";
+    const stHint = $("#sleeveTrendHint");
+    if (stHint) stHint.style.display = state.sleeveTrend ? "block" : "none";
     const bandHint = $("#bandHint");
     if (bandHint) {
-      const mom = state.rebalance === "MOM" || state.rebalance === "DMOM";
+      const mom =
+        state.rebalance === "MOM" ||
+        state.rebalance === "DMOM" ||
+        state.rebalance === "MOM12_1" ||
+        state.rebalance === "XSMOM";
       bandHint.style.display = state.bandOn ? "block" : "none";
       if (state.bandOn) {
         bandHint.textContent = mom
-          ? "밴드 ON이어도 MOM/DMOM은 월간 교체 로직을 유지합니다(밴드 미적용)."
+          ? "밴드 ON이어도 모멘텀류(MOM/MOM12_1/XSMOM/DMOM)는 월간 교체 로직을 유지합니다(밴드 미적용)."
           : "밴드 ON이면 Q/Y/M 캘린더를 쓰지 않고 매일 목표 대비 드리프트를 봅니다. |현재−목표| > 밴드(%)인 종목이 있으면 목표 비중으로 맞춥니다. DCA·국면헤지·금 슬리브 월초 강제 리밸런싱은 유지됩니다.";
       }
     }
@@ -3996,6 +4394,40 @@ document.addEventListener("DOMContentLoaded", () => {
       state.goldCode = resolveGoldCode(e.target.value);
     };
   }
+  const vtChk = $("#volTarget");
+  if (vtChk)
+    vtChk.onchange = (e) => {
+      state.volTarget = !!e.target.checked;
+      syncStratControls();
+    };
+  const vtPct = $("#volTargetPct");
+  if (vtPct)
+    vtPct.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.volTargetPct = Math.max(0.05, Math.min(0.2, Number.isFinite(v) ? v / 100 : 0.1));
+    };
+  const vtWin = $("#volTargetWindow");
+  if (vtWin)
+    vtWin.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.volTargetWindow = Math.max(20, Math.min(120, Number.isFinite(v) ? v : 60));
+    };
+  const stChk = $("#sleeveTrend");
+  if (stChk)
+    stChk.onchange = (e) => {
+      state.sleeveTrend = !!e.target.checked;
+      syncStratControls();
+    };
+  const stMode = $("#sleeveTrendMode");
+  if (stMode)
+    stMode.onchange = (e) => {
+      state.sleeveTrendMode = e.target.value === "ma" ? "ma" : "abs";
+    };
+  const stLb = $("#sleeveTrendLookback");
+  if (stLb)
+    stLb.onchange = (e) => {
+      state.sleeveTrendLookback = Number(e.target.value) >= 3 ? 3 : 1;
+    };
   const bandChk = $("#bandOn");
   if (bandChk)
     bandChk.onchange = (e) => {
