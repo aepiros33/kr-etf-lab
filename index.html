@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=batch4band1" />
+  <link rel="stylesheet" href="./styles.css?v=batch5cost1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -62,7 +62,7 @@
             </select>
           </label>
         </div>
-        <p class="muted-note" id="momHint" style="display:none">선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.</p>
+        <p class="muted-note" id="momHint" style="display:none">선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 회전(TO)에 거래비용 슬라이더 적용.</p>
 
         <label class="toggle">
           <input type="checkbox" id="bandOn" />
@@ -85,6 +85,16 @@
           </label>
         </div>
         <p class="muted-note" id="bandHint" style="display:none">밴드 ON이면 Q/Y/M 캘린더를 쓰지 않고 매일 목표 대비 드리프트를 봅니다. MOM/DMOM에는 적용하지 않습니다.</p>
+
+        <div class="section-title">거래비용</div>
+        <label class="field cost-field">비용률 <span id="tradeCostLabel">0.10% (10bps)</span>
+          <div class="weight-row cost-row">
+            <span class="cost-ends">0</span>
+            <input type="range" id="tradeCost" min="0" max="50" step="1" value="10" aria-label="거래비용 bps" />
+            <span class="cost-ends">50bps</span>
+          </div>
+        </label>
+        <p class="muted-note" id="costHint">리밸런싱(캘린더·밴드·MOM/DMOM·금 슬리브 전환 포함)마다 편도 회전율(TO)=0.5×Σ|Δw|에 비용률을 곱해 차감합니다. value −= value×TO×rate. 기본 0.10%(10bps, 기존 MOM 교체비용과 동일). 범위 0–0.5%. 초기 편입(day0)에는 미적용.</p>
 
         <div class="section-title">비중·국면</div>
         <div class="row mom-row">
@@ -183,11 +193,17 @@
         </div>
 
         <div class="section-title">분배금 · 총수익</div>
-        <label class="toggle">
-          <input type="checkbox" id="trOn" />
-          <span>분배금 재투자 (Total Return)</span>
-        </label>
-        <p class="muted-note">분배율은 모델값이며 실제 분배금과 다를 수 있음.</p>
+        <div id="priceReturnDisclosure" class="price-return-box">
+          <strong>이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.</strong>
+          <p class="muted-note" style="margin:6px 0 0">실제 분배금·TR 시계열이 데이터에 없으면 합성 TR을 만들지 않습니다. TR 플래그가 메타에 생기면 아래에서 토글할 수 있습니다.</p>
+        </div>
+        <div id="trSection" style="display:none">
+          <label class="toggle">
+            <input type="checkbox" id="trOn" />
+            <span>분배금 재투자 (Total Return)</span>
+          </label>
+          <p class="muted-note">실제 TR/분배 시계열이 있을 때만 사용합니다. 세금은 별도 모형입니다.</p>
+        </div>
 
         <div class="section-title">계좌 · 세금 모형 (단순화)</div>
         <label class="toggle">
@@ -257,12 +273,13 @@
       시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.
       모멘텀·역변동성·이동평균 등 파라미터는 민감합니다. 특정 설정을 따라가면 수익이 난다는 뜻이 아닙니다.
       시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
-      Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
+      이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다. 실제 TR 시계열이 있을 때만 TR 토글이 활성화됩니다.
+      리밸런싱 거래비용은 편도 회전율(TO)×비용률로 차감합니다(기본 0.10%).
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=batch4band1"></script>
+  <script src="./app.js?v=batch5cost1"></script>
 </body>
 </html>

@@ -378,3 +378,26 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
   .compare-chart-wrap { height: 260px; }
   .compare-slot-btns { flex-wrap: wrap; }
 }
+
+/* Batch 5: cost + price-return disclosure */
+.cost-field { display: block; margin: 4px 0 8px; font-size: 12px; color: var(--muted); }
+.cost-row { margin-top: 6px; }
+.cost-ends { font-size: 10px; color: var(--dim); min-width: 2.5rem; }
+.price-return-box {
+  background: rgba(240,194,122,.12);
+  border: 1px solid rgba(240,194,122,.5);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #f0d9a8;
+  line-height: 1.5;
+}
+.price-return-banner {
+  background: rgba(240,194,122,.1);
+  border: 1px solid rgba(240,194,122,.4);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: #f0d9a8 !important;
+  font-weight: 600;
+}

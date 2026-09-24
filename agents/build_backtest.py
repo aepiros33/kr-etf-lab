@@ -3,6 +3,8 @@
 
 Rebalancing: same-day mark-to-market THEN rebalance (do not zero rebalance-day returns).
 Monthly DCA: on first trading day of each month, add cash then buy to target weights.
+Trading cost (mom_cost / trade cost): on each rebalance, value -= value × TO × rate
+where TO = 0.5 × Σ|w_new−w_old| (one-way turnover). Default rate 0.1% (0–0.5%).
 """
 from __future__ import annotations
 
@@ -48,6 +50,8 @@ class Stats:
     rebal_count: int = 0
     band_applied: bool = False
     band_pct: float | None = None
+    trade_cost: float = 0.001
+    total_cost_drag: float = 0.0
 
 
 def load(codes: list[str] | None = None):
@@ -503,6 +507,47 @@ def _band_drift_exceeds(
     return False
 
 
+
+TRADE_COST_DEFAULT = 0.001  # 0.1% = 10bps (matches legacy MOM switch cost)
+TRADE_COST_MIN = 0.0
+TRADE_COST_MAX = 0.005  # 0.5% = 50bps
+
+
+def _clamp_trade_cost(rate: float | None) -> float:
+    """Trading cost rate as fraction of one-way traded notional (0–0.5%)."""
+    if rate is None:
+        v = TRADE_COST_DEFAULT
+    else:
+        try:
+            v = float(rate)
+        except (TypeError, ValueError):
+            v = TRADE_COST_DEFAULT
+    if not math.isfinite(v):
+        v = TRADE_COST_DEFAULT
+    return min(TRADE_COST_MAX, max(TRADE_COST_MIN, v))
+
+
+def _current_weights(units: dict, prices: dict, d: str, value: float) -> dict[str, float]:
+    if not (value > 0) or not units:
+        return {}
+    out: dict[str, float] = {}
+    for c, u in units.items():
+        px = prices.get(c, {}).get(d)
+        if px is None or not (px > 0):
+            continue
+        out[c] = (u * px) / value
+    return out
+
+
+def _one_way_turnover(w_old: dict[str, float], w_new: dict[str, float]) -> float:
+    """One-way turnover = 0.5 * sum_i |w_new_i - w_old_i| (fraction of portfolio)."""
+    codes = set(w_old or {}) | set(w_new or {})
+    s = 0.0
+    for c in codes:
+        s += abs(float((w_new or {}).get(c, 0.0)) - float((w_old or {}).get(c, 0.0)))
+    return 0.5 * s
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -590,7 +635,7 @@ def backtest(
 
     lookback = 3 if int(mom_lookback) >= 3 else 1
     top_n = max(1, int(mom_top_n))
-    cost = max(0.0, float(mom_cost))
+    cost = _clamp_trade_cost(mom_cost)
     vol_win = max(2, int(vol_window))
     ma_win = max(2, int(ma_window))
     use_inv = weighting == "invVol"
@@ -637,6 +682,7 @@ def backtest(
     gold_log: list[dict] = []
     prev_gold_state: bool | None = None
     rebal_count = 0
+    total_cost_drag = 0.0
 
     def _target_weights(d: str) -> tuple[dict[str, float], list[str], bool | None]:
         nonlocal last_regime, last_hedge, last_gold_on, last_gold_holding
@@ -736,19 +782,19 @@ def backtest(
             # 3) Rebalance after MTM (+ optional cash)
             if do_rebal:
                 rebal_count += 1
+                # Pre-trade weights after MTM (+ optional DCA cash)
+                w_old = _current_weights(units, prices, d, value)
                 new_tw, new_active, g_state = _target_weights(d)
                 new_set = set(new_active)
-                if mom_like and prev_holdings is not None and new_set != prev_holdings and cost > 0:
-                    value *= 1.0 - cost
-                # GOLDON flip cost on sleeve notional only (value × sleevePct × 0.001)
-                if (
-                    gold_on
-                    and prev_gold_state is not None
-                    and g_state is not None
-                    and g_state != prev_gold_state
-                    and cost > 0
-                ):
-                    value *= 1.0 - cost * gold_sleeve
+                # Unified turnover cost (calendar / band / MOM / gold flip via weight change):
+                # drag = value × one_way_turnover × cost_rate
+                # one_way_turnover = 0.5 × Σ|w_new − w_old|
+                if cost > 0 and prev_holdings is not None:
+                    turnover = _one_way_turnover(w_old, new_tw)
+                    if turnover > 0:
+                        drag = value * turnover * cost
+                        total_cost_drag += drag
+                        value -= drag
                 if gold_on:
                     prev_gold_state = g_state
                 current_tw = new_tw
@@ -850,6 +896,8 @@ def backtest(
         rebal_count=rebal_count,
         band_applied=band_active,
         band_pct=band_pct_c if band_active else None,
+        trade_cost=cost,
+        total_cost_drag=total_cost_drag,
     )
 
 

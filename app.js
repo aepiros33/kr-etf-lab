@@ -154,6 +154,8 @@ const state = {
   goldCode: "132030", // 411060 spot | 132030 futures long (default long for 10y)
   bandOn: false,
   bandPct: 0.05, // UI 1–10%, default 5%
+  /** Trading cost rate (fraction of one-way turnover). Default 0.1% = legacy MOM. */
+  tradeCost: 0.001,
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -406,12 +408,16 @@ function encodeShareParams() {
     p.set("band", "1");
     p.set("bp", String(Math.round(clampBandPct(state.bandPct) * 100)));
   }
+  {
+    const bps = Math.round(clampTradeCost(state.tradeCost) * 10000);
+    if (bps !== Math.round(TRADE_COST_DEFAULT * 10000)) p.set("tc", String(bps));
+  }
   if (state.dcaOn) {
     p.set("dca", "1");
     p.set("ic", String(state.initialCapital || 10000000));
     p.set("mo", String(state.monthlyAmount || 0));
   }
-  if (state.totalReturn) p.set("tr", "1");
+  if (state.totalReturn && hasRealTrData()) p.set("tr", "1");
   if (state.accountType === "pension") {
     p.set("acct", "pension");
     p.set("ptr", String(state.pensionTaxRate || 0.044));
@@ -486,11 +492,20 @@ function syncControlsFromState() {
   setVal("bandPct", String(Math.round(clampBandPct(state.bandPct) * 100)));
   const bandRow = $("#bandRow");
   if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
+  const tcEl = $("#tradeCost");
+  if (tcEl) tcEl.value = String(Math.round(clampTradeCost(state.tradeCost) * 10000));
+  updateTradeCostLabel();
   setChk("dcaOn", state.dcaOn);
   const dcaIn = $("#dcaInputs");
   if (dcaIn) dcaIn.style.display = state.dcaOn ? "flex" : "none";
   setVal("initialCapital", String(state.initialCapital));
   setVal("monthlyAmount", String(state.monthlyAmount));
+  const trWrap = $("#trSection");
+  const realTr = hasRealTrData();
+  if (trWrap) trWrap.style.display = realTr ? "block" : "none";
+  const priceDisc = $("#priceReturnDisclosure");
+  if (priceDisc) priceDisc.style.display = realTr ? "none" : "block";
+  if (!realTr) state.totalReturn = false;
   setChk("trOn", state.totalReturn);
   if (state.accountType === "pension") {
     const p = $("#acctPension");
@@ -562,10 +577,14 @@ async function applyShareParams(params) {
     const v = Number(params.get("bp"));
     state.bandPct = clampBandPct(Number.isFinite(v) ? v / 100 : BAND_PCT_DEFAULT);
   }
+  if (params.get("tc") != null && params.get("tc") !== "") {
+    const bps = Number(params.get("tc"));
+    state.tradeCost = clampTradeCost(Number.isFinite(bps) ? bps / 10000 : TRADE_COST_DEFAULT);
+  }
   state.dcaOn = params.get("dca") === "1";
   if (params.get("ic")) state.initialCapital = Math.max(1, Number(params.get("ic")) || 1);
   if (params.get("mo")) state.monthlyAmount = Math.max(0, Number(params.get("mo")) || 0);
-  state.totalReturn = params.get("tr") === "1";
+  state.totalReturn = params.get("tr") === "1" && hasRealTrData();
   if (params.get("acct") === "pension") {
     state.accountType = "pension";
     if (params.get("ptr")) state.pensionTaxRate = Number(params.get("ptr")) || 0.044;
@@ -609,6 +628,8 @@ function exportRunCsv() {
   lines.push(["meta", "generated", new Date().toISOString().slice(0, 19)].map(csvEscape).join(","));
   lines.push(["meta", "pricesAsOf", state.pricesAsOf || ""].map(csvEscape).join(","));
   lines.push(["meta", "note", "시뮬레이터 결과 내보내기 · 투자 자문 아님"].map(csvEscape).join(","));
+  lines.push(["meta", "returnBasis", "가격수익률(분배금·세금 미반영)"].map(csvEscape).join(","));
+  lines.push(["meta", "costFormula", "리밸런싱 시 value -= value×TO×rate; TO=0.5×Σ|Δw|"].map(csvEscape).join(","));
   lines.push("");
   lines.push("section,code,name,weight_pct");
   for (const [code, w] of picks) {
@@ -635,6 +656,8 @@ function exportRunCsv() {
     ["goldCode", resolveGoldCode(state.goldCode)],
     ["bandOn", state.bandOn],
     ["bandPct", clampBandPct(state.bandPct)],
+    ["tradeCost", clampTradeCost(state.tradeCost)],
+    ["tradeCostBps", Math.round(clampTradeCost(state.tradeCost) * 10000)],
     ["dcaOn", state.dcaOn],
     ["initialCapital", state.initialCapital],
     ["monthlyAmount", state.monthlyAmount],
@@ -661,6 +684,8 @@ function exportRunCsv() {
     ["finalValue", r.finalValue],
     ["rebalCount", r.rebalCount != null ? r.rebalCount : ""],
     ["bandApplied", !!r.bandApplied],
+    ["tradeCost", r.tradeCost != null ? r.tradeCost : ""],
+    ["totalCostDrag", r.totalCostDrag != null ? r.totalCostDrag : ""],
   ];
   for (const [k, v] of kpis) {
     lines.push(["kpi", k, v].map(csvEscape).join(","));
@@ -1380,7 +1405,8 @@ async function run() {
       ...(needGold ? [resolveGoldCode(state.goldCode), GOLD_CASH] : []),
     ]),
   ];
-  const priceMap = state.totalReturn
+  const useTr = state.totalReturn && hasRealTrData();
+  const priceMap = useTr
     ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
   if ((state.rebalance === "MOM" || state.rebalance === "DMOM") && !picks.length) {
@@ -1398,7 +1424,7 @@ async function run() {
     {
       lookback: state.momLookback,
       topN: state.momTopN,
-      cost: 0.001,
+      cost: clampTradeCost(state.tradeCost),
       weighting: state.weighting,
       volWindow: state.volWindow,
       maOverlay: state.maOverlay,
@@ -1737,10 +1763,62 @@ function bandDriftExceeds(units, priceMap, d, value, targetTw, bandPct) {
   return false;
 }
 
+
+const TRADE_COST_DEFAULT = 0.001; // 0.1% = 10bps
+const TRADE_COST_MIN = 0;
+const TRADE_COST_MAX = 0.005; // 0.5% = 50bps
+
+/** Mirror agents/build_backtest._clamp_trade_cost */
+function clampTradeCost(rate) {
+  let v = rate != null ? Number(rate) : TRADE_COST_DEFAULT;
+  if (!Number.isFinite(v)) v = TRADE_COST_DEFAULT;
+  return Math.min(TRADE_COST_MAX, Math.max(TRADE_COST_MIN, v));
+}
+
+/** Current portfolio weights from units (after MTM). */
+function currentWeights(units, priceMap, d, value) {
+  if (!(value > 0) || !units) return {};
+  const out = {};
+  for (const c of Object.keys(units)) {
+    const px = priceMap[c] && priceMap[c][d];
+    if (px == null || !(px > 0)) continue;
+    out[c] = (units[c] * px) / value;
+  }
+  return out;
+}
+
+/** One-way turnover = 0.5 * Σ|w_new − w_old| */
+function oneWayTurnover(wOld, wNew) {
+  const codes = new Set([...Object.keys(wOld || {}), ...Object.keys(wNew || {})]);
+  let s = 0;
+  for (const c of codes) {
+    s += Math.abs((wNew && wNew[c] != null ? Number(wNew[c]) : 0) - (wOld && wOld[c] != null ? Number(wOld[c]) : 0));
+  }
+  return 0.5 * s;
+}
+
+/** Real TR series only — never invent dividends. meta.hasTotalReturn / etf.tr|trCode */
+function hasRealTrData() {
+  const m = state.meta;
+  if (!m) return false;
+  if (m.hasTotalReturn === true || m.hasTR === true) return true;
+  const etfs = m.etfs || [];
+  return etfs.some((e) => e && (e.tr === true || e.hasTR === true || e.trCode || e.trSeries));
+}
+
+function updateTradeCostLabel() {
+  const el = $("#tradeCostLabel");
+  if (!el) return;
+  const rate = clampTradeCost(state.tradeCost);
+  const bps = Math.round(rate * 10000);
+  const pctStr = (rate * 100).toFixed(2);
+  el.textContent = `${pctStr}% (${bps}bps)`;
+}
+
 /**
  * Same-day: mark-to-market THEN rebalance.
  * DCA: on first trading day of each new month, add cash then buy to target weights.
- * MOM/DMOM: monthly momentum; turnover cost when holdings set changes.
+ * Trading cost: on each rebalance, value -= value × TO × rate (TO = one-way turnover).
  * weighting invVol / maOverlay applied on rebalance days (and day 0).
  * Numbers are computed only here (and in agents/build_backtest.py).
  */
@@ -1761,7 +1839,7 @@ function backtest(
 
   const lookback = Number(opts.lookback) >= 3 ? 3 : 1;
   const topN = Math.max(1, Number(opts.topN) || 3);
-  const momCost = Math.max(0, Number(opts.cost ?? 0.001));
+  const momCost = clampTradeCost(opts.cost != null ? opts.cost : TRADE_COST_DEFAULT);
   const weighting = opts.weighting === "invVol" ? "invVol" : "fixed";
   const volWindow = Math.max(2, Number(opts.volWindow) || 60);
   const maOverlay = !!opts.maOverlay;
@@ -1880,6 +1958,7 @@ function backtest(
   let lastGoldHolding = null;
   let prevGoldState = null;
   let rebalCount = 0;
+  let totalCostDrag = 0;
   const curve = [],
     rets = [];
 
@@ -1967,20 +2046,18 @@ function backtest(
       }
       if (doRebal) {
         rebalCount += 1;
+        const wOld = currentWeights(units, priceMap, d, value);
         const [newTw, newActive, gState] = targetWeights(d);
         const newSet = new Set(newActive);
-        const changed =
-          prevHoldings &&
-          (newSet.size !== prevHoldings.size || [...newSet].some((c) => !prevHoldings.has(c)));
-        if (momLike && changed && momCost > 0) value *= 1 - momCost;
-        if (
-          goldOn &&
-          prevGoldState != null &&
-          gState != null &&
-          gState !== prevGoldState &&
-          momCost > 0
-        ) {
-          value *= 1 - momCost * goldSleeve;
+        // Unified turnover cost (calendar / band / MOM / gold via weight Δ):
+        // drag = value × oneWayTurnover × costRate
+        if (momCost > 0 && prevHoldings != null) {
+          const turnover = oneWayTurnover(wOld, newTw);
+          if (turnover > 0) {
+            const drag = value * turnover * momCost;
+            totalCostDrag += drag;
+            value -= drag;
+          }
         }
         if (goldOn) prevGoldState = gState;
         currentTw = newTw;
@@ -2077,6 +2154,8 @@ function backtest(
     rebalCount,
     bandApplied: bandActive,
     bandPct: bandActive ? bandPctC : null,
+    tradeCost: momCost,
+    totalCostDrag,
   };
 }
 
@@ -2469,7 +2548,7 @@ function renderMomHoldings(rows) {
   const title = dual ? "듀얼 모멘텀" : "모멘텀";
   return `<div class="card pad" id="momHoldings"><div class="section-title">월간 편입 표 (${title} · 최근 ${slice.length}개월)</div>
     <table><thead><tr><th>월</th><th>코드</th><th>종목 · 비중</th></tr></thead><tbody>${body}</tbody></table>
-    <div class="warn">편입은 전월 말 기준 ${state.momLookback}개월 수익률 상위 ${state.momTopN}${dual ? " · 절대모멘텀(안전자산 대비) 필터" : ""} · 교체 시 비용 0.1% · 당월 성과는 순위 산정에 쓰지 않음</div>
+    <div class="warn">편입은 전월 말 기준 ${state.momLookback}개월 수익률 상위 ${state.momTopN}${dual ? " · 절대모멘텀(안전자산 대비) 필터" : ""} · 교체 회전(TO)에 거래비용 적용 · 당월 성과는 순위 산정에 쓰지 않음</div>
   </div>`;
 }
 
@@ -2497,6 +2576,7 @@ function currentStrategyCfg() {
     goldCode: resolveGoldCode(state.goldCode),
     bandOn: !!state.bandOn,
     bandPct: clampBandPct(state.bandPct),
+    tradeCost: clampTradeCost(state.tradeCost),
     dcaOn: state.dcaOn,
     initialCapital: state.initialCapital,
     monthlyAmount: state.monthlyAmount,
@@ -2623,7 +2703,8 @@ async function executePortBacktest(picks, start, end, cfg) {
       ...(needGold ? [resolveGoldCode(cfg.goldCode), GOLD_CASH] : []),
     ]),
   ];
-  const priceMap = cfg.totalReturn
+  const useTr = cfg.totalReturn && hasRealTrData();
+  const priceMap = useTr
     ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
   const initial = cfg.dcaOn ? cfg.initialCapital : 1;
@@ -2631,7 +2712,7 @@ async function executePortBacktest(picks, start, end, cfg) {
   return backtest(Object.fromEntries(picks), priceMap, start, end, cfg.rebalance, initial, monthly, {
     lookback: cfg.momLookback,
     topN: cfg.momTopN,
-    cost: 0.001,
+    cost: clampTradeCost(cfg.tradeCost != null ? cfg.tradeCost : state.tradeCost),
     weighting: cfg.weighting,
     volWindow: cfg.volWindow,
     maOverlay: cfg.maOverlay,
@@ -2990,10 +3071,16 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
     r.monthlyContribution > 0
       ? `<div class="warn">월 적립 · 납입 합 ${won(r.totalInvested)} → 기말 ${won(r.finalValue)} · ${r.contributions}회 납입 · 수익률은 납입 원금 합 대비</div>`
       : "";
-  const trNote = state.totalReturn
-    ? `<div class="warn">Total Return 모드 · 분배율 모델값으로 일별 합성 가격 사용 · 실제 분배금과 다를 수 있음</div>`
-    : "";
-  const retLabel = state.totalReturn ? "가격+분배(모형)" : "가격수익률(분배금 미포함)";
+  const usingTr = state.totalReturn && hasRealTrData();
+  const trNote = usingTr
+    ? `<div class="warn">Total Return · 실제 TR/분배 시계열 적용 · 세금 미반영</div>`
+    : `<div class="warn price-return-banner">이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.</div>`;
+  const retLabel = usingTr ? "총수익(TR·분배 포함)" : "가격수익률(분배금 미포함)";
+  const costRate = r.tradeCost != null ? Number(r.tradeCost) : clampTradeCost(state.tradeCost);
+  const costDrag = r.totalCostDrag != null ? Number(r.totalCostDrag) : 0;
+  const costNote = `<div class="warn">거래비용 · 가정 ${ (costRate * 100).toFixed(2) }% (${ Math.round(costRate * 10000) }bps) · 누적 비용드래그 ${
+    r.initialCapital > 1 ? won(costDrag) : costDrag.toFixed(6) + " (상대원금=1)"
+  } · 공식: 리밸 시 value −= value×TO×rate, TO=0.5×Σ|Δw| (편도 회전율)</div>`;
   destroyExtraCharts();
   const dd = computeDrawdown(r.curve);
   const benchDd = bench && bench.curve ? computeDrawdown(bench.curve) : null;
@@ -3035,7 +3122,7 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -3117,7 +3204,9 @@ function reviewAgent(r, bench, picks) {
     );
     lines.push(`· 납입 합 ${won(r.totalInvested)}, 기말 평가 ${won(r.finalValue)}.`);
   }
-  if (state.totalReturn) lines.push("· Total Return(분배 모형) 적용 중입니다.");
+  if (state.totalReturn && hasRealTrData()) lines.push("· Total Return(실제 TR 시계열) 적용 중입니다.");
+  else lines.push("· 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.");
+  lines.push(`· 거래비용 ${ (clampTradeCost(state.tradeCost) * 100).toFixed(2) }% · 누적 드래그 ${ r.totalCostDrag != null ? Number(r.totalCostDrag).toFixed(6) : "—" }.`);
   const vs = r.cagr - (bench.cagr || 0);
   if (vs > 0.01) lines.push(`· 같은 기간 KODEX 200보다 연환산 ${pct(vs)} 앞섭니다.`);
   else if (vs < -0.01) lines.push(`· KODEX 200보다 연환산 ${pct(vs)} 뒤처졌습니다.`);
@@ -3131,8 +3220,9 @@ function reviewAgent(r, bench, picks) {
   lines.push(
     "",
     "한계",
-    "· 기본은 가격 수익률입니다. TR 토글 시에도 분배율은 모델값입니다.",
-    "· 세금·수수료 모형은 단순화되어 있습니다.",
+    "· 기본은 가격 수익률입니다. 분배금 TR 시계열이 있을 때만 TR 토글이 켜집니다.",
+    "· 리밸런싱 거래비용은 편도 회전율(TO)×비용률로 차감합니다.",
+    "· 세금 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
     "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다.",
     "· 모멘텀·역변동성·이동평균·금 슬리브 파라미터는 민감하며 과거≠미래입니다."
@@ -3156,8 +3246,8 @@ document.addEventListener("DOMContentLoaded", () => {
       hint.style.display = on ? "block" : "none";
       hint.textContent =
         state.rebalance === "DMOM"
-          ? "선택한 ETF가 듀얼 모멘텀 유니버스입니다. 상대 모멘텀 상위 N 후 안전자산 대비 절대 필터 · 교체 시 0.1% 비용."
-          : "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 시 0.1% 비용.";
+          ? "선택한 ETF가 듀얼 모멘텀 유니버스입니다. 상대 모멘텀 상위 N 후 안전자산 대비 절대 필터 · 교체 회전(TO)에 거래비용 슬라이더 적용."
+          : "선택한 ETF가 모멘텀 유니버스입니다. 전월 말 기준 수익률 상위 N을 동일비중 · 교체 회전(TO)에 거래비용 슬라이더 적용.";
     }
     const cashRow = $("#dmomCashRow");
     if (cashRow)
@@ -3292,9 +3382,24 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#monthlyAmount").onchange = (e) => {
     state.monthlyAmount = Math.max(0, Number(e.target.value) || 0);
   };
-  $("#trOn").onchange = (e) => {
-    state.totalReturn = e.target.checked;
-  };
+  const tcSlider = $("#tradeCost");
+  if (tcSlider) {
+    const syncTc = (e) => {
+      const bps = Number(e.target.value);
+      state.tradeCost = clampTradeCost(Number.isFinite(bps) ? bps / 10000 : TRADE_COST_DEFAULT);
+      updateTradeCostLabel();
+    };
+    tcSlider.oninput = syncTc;
+    tcSlider.onchange = syncTc;
+    updateTradeCostLabel();
+  }
+  const trOn = $("#trOn");
+  if (trOn) {
+    trOn.onchange = (e) => {
+      state.totalReturn = !!e.target.checked && hasRealTrData();
+      if (e.target.checked && !hasRealTrData()) e.target.checked = false;
+    };
+  }
   const syncAcct = () => {
     state.accountType = $("#acctPension").checked ? "pension" : "taxable";
     $("#pensionTaxRow").style.display = state.accountType === "pension" ? "flex" : "none";

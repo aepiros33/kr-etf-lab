@@ -848,6 +848,78 @@ def main():
     # --- Existing MOM / yearly / presets still covered above ---
 
 
+
+    # --- Trading cost / turnover (Batch 5) ---
+    from build_backtest import _clamp_trade_cost, _one_way_turnover, _current_weights
+
+    if abs(_clamp_trade_cost(None) - 0.001) > 1e-12:
+        fail("trade cost default")
+    if abs(_clamp_trade_cost(-1) - 0.0) > 1e-12:
+        fail("trade cost min clamp")
+    if abs(_clamp_trade_cost(0.9) - 0.005) > 1e-12:
+        fail("trade cost max clamp")
+    if abs(_one_way_turnover({"A": 0.5, "B": 0.5}, {"A": 0.5, "B": 0.5}) - 0.0) > 1e-12:
+        fail("turnover identical weights")
+    # Full switch equal-weight 2→2: TO = 1.0
+    if abs(_one_way_turnover({"A": 0.5, "B": 0.5}, {"C": 0.5, "D": 0.5}) - 1.0) > 1e-12:
+        fail("turnover full switch")
+    # Sleeve flip 15%: TO = 0.15
+    if abs(_one_way_turnover({"G": 0.15, "X": 0.85}, {"C": 0.15, "X": 0.85}) - 0.15) > 1e-12:
+        fail("turnover sleeve flip")
+
+    cost_w = {"069500": 0.6, bond_band: 0.4}
+    c0 = backtest(cost_w, prices, start="2019-01-01", rebalance="Q", mom_cost=0.0)
+    c1 = backtest(cost_w, prices, start="2019-01-01", rebalance="Q", mom_cost=0.001)
+    c2 = backtest(cost_w, prices, start="2019-01-01", rebalance="Q", mom_cost=0.005)
+    if abs(c0.trade_cost - 0.0) > 1e-12:
+        fail(f"trade_cost recorded 0: {c0.trade_cost}")
+    if abs(c1.trade_cost - 0.001) > 1e-12:
+        fail(f"trade_cost recorded 10bps: {c1.trade_cost}")
+    if c0.total_cost_drag > 1e-12:
+        fail("zero cost should have zero drag")
+    if c1.rebal_count > 0:
+        if not (c1.total_cost_drag > 0):
+            fail("Q rebal with cost>0 should accumulate drag")
+        if not (c1.final_value < c0.final_value - 1e-12):
+            fail("cost should reduce final value vs cost=0")
+        if not (c2.final_value <= c1.final_value + 1e-12):
+            fail("higher cost should not increase final value")
+        if not (c2.total_cost_drag + 1e-12 >= c1.total_cost_drag):
+            fail("higher cost rate should not lower total drag when TO>0")
+
+    # MOM: cost path differs when holdings change (legacy invariant, now via turnover)
+    mom0 = backtest(
+        {"069500": 1.0, "133690": 1.0, bond_band: 1.0},
+        prices, start="2019-01-01", rebalance="MOM",
+        mom_lookback=1, mom_top_n=2, mom_cost=0.0,
+    )
+    mom1 = backtest(
+        {"069500": 1.0, "133690": 1.0, bond_band: 1.0},
+        prices, start="2019-01-01", rebalance="MOM",
+        mom_lookback=1, mom_top_n=2, mom_cost=0.001,
+    )
+    if mom1.rebal_count > 1 and abs(mom0.total_return - mom1.total_return) < 1e-15:
+        # Only fail if holdings actually changed at least once
+        changes = 0
+        prev = None
+        for h in mom1.mom_holdings or []:
+            s = tuple(sorted(h.get("codes") or []))
+            if prev is not None and s != prev:
+                changes += 1
+            prev = s
+        if changes > 0:
+            fail("MOM turnover cost should change path when holdings switch")
+
+    # Price-return disclosure (no invented TR): UI must state price-return basis
+    idx = (ROOT / "index.html").read_text(encoding="utf-8")
+    app_js = (ROOT / "app.js").read_text(encoding="utf-8")
+    disclosure = "이 시뮬은 가격수익률 기준입니다"
+    if disclosure not in idx and disclosure not in app_js:
+        fail("price-return disclosure missing from UI")
+    # Fake synthetic TR must stay gated (no inventing dividends without real series)
+    if "hasRealTrData" not in app_js:
+        fail("hasRealTrData gate missing — synthetic TR must not run without real data")
+
     print("PASS")
 
     print(
