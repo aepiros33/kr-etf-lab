@@ -152,6 +152,8 @@ const state = {
   goldSleevePct: 0.15, // UI 10–20%
   goldLookback: 1, // 1|3
   goldCode: "132030", // 411060 spot | 132030 futures long (default long for 10y)
+  bandOn: false,
+  bandPct: 0.05, // UI 1–10%, default 5%
   chart: null,
   ddChart: null,
   rollingChart: null,
@@ -400,6 +402,10 @@ function encodeShareParams() {
     p.set("glb", String(state.goldLookback || 1));
     p.set("gc", resolveGoldCode(state.goldCode));
   }
+  if (state.bandOn) {
+    p.set("band", "1");
+    p.set("bp", String(Math.round(clampBandPct(state.bandPct) * 100)));
+  }
   if (state.dcaOn) {
     p.set("dca", "1");
     p.set("ic", String(state.initialCapital || 10000000));
@@ -476,6 +482,10 @@ function syncControlsFromState() {
   setVal("goldSleevePct", String(Math.round(clampGoldSleeve(state.goldSleevePct) * 100)));
   setVal("goldLookback", String(state.goldLookback));
   setVal("goldCode", resolveGoldCode(state.goldCode));
+  setChk("bandOn", state.bandOn);
+  setVal("bandPct", String(Math.round(clampBandPct(state.bandPct) * 100)));
+  const bandRow = $("#bandRow");
+  if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
   setChk("dcaOn", state.dcaOn);
   const dcaIn = $("#dcaInputs");
   if (dcaIn) dcaIn.style.display = state.dcaOn ? "flex" : "none";
@@ -547,6 +557,11 @@ async function applyShareParams(params) {
   if (params.get("gsp")) state.goldSleevePct = clampGoldSleeve(Number(params.get("gsp")) / 100);
   if (params.get("glb")) state.goldLookback = Number(params.get("glb")) >= 3 ? 3 : 1;
   if (params.get("gc")) state.goldCode = resolveGoldCode(params.get("gc"));
+  state.bandOn = params.get("band") === "1";
+  if (params.get("bp")) {
+    const v = Number(params.get("bp"));
+    state.bandPct = clampBandPct(Number.isFinite(v) ? v / 100 : BAND_PCT_DEFAULT);
+  }
   state.dcaOn = params.get("dca") === "1";
   if (params.get("ic")) state.initialCapital = Math.max(1, Number(params.get("ic")) || 1);
   if (params.get("mo")) state.monthlyAmount = Math.max(0, Number(params.get("mo")) || 0);
@@ -618,6 +633,8 @@ function exportRunCsv() {
     ["goldSleevePct", clampGoldSleeve(state.goldSleevePct)],
     ["goldLookback", state.goldLookback],
     ["goldCode", resolveGoldCode(state.goldCode)],
+    ["bandOn", state.bandOn],
+    ["bandPct", clampBandPct(state.bandPct)],
     ["dcaOn", state.dcaOn],
     ["initialCapital", state.initialCapital],
     ["monthlyAmount", state.monthlyAmount],
@@ -642,6 +659,8 @@ function exportRunCsv() {
     ["sharpe", r.sharpe],
     ["totalInvested", r.totalInvested],
     ["finalValue", r.finalValue],
+    ["rebalCount", r.rebalCount != null ? r.rebalCount : ""],
+    ["bandApplied", !!r.bandApplied],
   ];
   for (const [k, v] of kpis) {
     lines.push(["kpi", k, v].map(csvEscape).join(","));
@@ -848,6 +867,8 @@ async function boot() {
     if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
     const gRow = $("#goldOnRow");
     if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
+    const bandRow = $("#bandRow");
+    if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
     const momRow = $("#momControls");
     if (momRow)
       momRow.style.display =
@@ -1392,6 +1413,8 @@ async function run() {
       goldSleevePct: clampGoldSleeve(state.goldSleevePct),
       goldLookback: state.goldLookback,
       goldCode: resolveGoldCode(state.goldCode),
+      bandOn: !!state.bandOn,
+      bandPct: clampBandPct(state.bandPct),
     }
   );
   const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
@@ -1686,6 +1709,34 @@ function applyGoldSleeve(tw, goldOn, sleevePct, goldCode = GOLD_CODE) {
   return Object.fromEntries(Object.entries(out).filter(([, w]) => w > 0).map(([c, w]) => [c, w / tot]));
 }
 
+const BAND_PCT_DEFAULT = 0.05;
+const BAND_PCT_MIN = 0.01;
+const BAND_PCT_MAX = 0.1;
+
+/** Mirror agents/build_backtest._clamp_band_pct */
+function clampBandPct(bandPct) {
+  let v = bandPct != null ? Number(bandPct) : BAND_PCT_DEFAULT;
+  if (!Number.isFinite(v)) v = BAND_PCT_DEFAULT;
+  return Math.min(BAND_PCT_MAX, Math.max(BAND_PCT_MIN, v));
+}
+
+/** Mirror agents/build_backtest._band_drift_exceeds */
+function bandDriftExceeds(units, priceMap, d, value, targetTw, bandPct) {
+  if (!(value > 0) || !(bandPct >= 0)) return false;
+  const codes = new Set([...Object.keys(units || {}), ...Object.keys(targetTw || {})]);
+  for (const c of codes) {
+    let w = 0;
+    if (units && units[c] != null) {
+      const px = priceMap[c] && priceMap[c][d];
+      if (px == null || !(px > 0)) continue;
+      w = (units[c] * px) / value;
+    }
+    const t = targetTw && targetTw[c] != null ? Number(targetTw[c]) : 0;
+    if (Math.abs(w - t) > bandPct + 1e-12) return true;
+  }
+  return false;
+}
+
 /**
  * Same-day: mark-to-market THEN rebalance.
  * DCA: on first trading day of each new month, add cash then buy to target weights.
@@ -1727,6 +1778,7 @@ function backtest(
   const goldSleeve = clampGoldSleeve(opts.goldSleevePct != null ? opts.goldSleevePct : GOLD_SLEEVE_DEFAULT);
   const goldLb = Number(opts.goldLookback) >= 3 ? 3 : 1;
   const goldHold = resolveGoldCode(opts.goldCode);
+  const bandOnOpt = !!opts.bandOn;
   let hedgeCodeRes = null;
   if (regimeHedge) {
     try {
@@ -1736,6 +1788,9 @@ function backtest(
     }
   }
   const momLike = rebalance === "MOM" || rebalance === "DMOM";
+  // Band: fixed-target modes only; MOM/DMOM keep monthly calendar swaps.
+  const bandActive = bandOnOpt && !momLike;
+  const bandPctC = bandActive ? clampBandPct(opts.bandPct) : 0;
   const needCash = rebalance === "DMOM" || maOverlay || (regimeHedge && regimeHedgeMode === "cash");
 
   if (needCash && !priceMap[cashCode]) {
@@ -1824,6 +1879,7 @@ function backtest(
   let lastGoldOn = null;
   let lastGoldHolding = null;
   let prevGoldState = null;
+  let rebalCount = 0;
   const curve = [],
     rets = [];
 
@@ -1895,7 +1951,9 @@ function backtest(
       if (prevValue != null && prevValue > 0) rets.push([d, value / prevValue - 1]);
 
       // 2) DCA cash then 3) rebalance
-      let doRebal = isRebal(prev, d);
+      // Band mode: ignore Q/Y/M calendar; daily drift vs last targets.
+      // MOM/DMOM: bandActive is false → keep monthly calendar.
+      let doRebal = bandActive ? false : isRebal(prev, d);
       if (regimeHedge && isNewMonth(prev, d)) doRebal = true;
       if (goldOn && isNewMonth(prev, d)) doRebal = true;
       if (monthlyContribution > 0 && isNewMonth(prev, d)) {
@@ -1904,7 +1962,11 @@ function backtest(
         contributions += 1;
         doRebal = true;
       }
+      if (bandActive && bandDriftExceeds(units, priceMap, d, value, currentTw, bandPctC)) {
+        doRebal = true;
+      }
       if (doRebal) {
+        rebalCount += 1;
         const [newTw, newActive, gState] = targetWeights(d);
         const newSet = new Set(newActive);
         const changed =
@@ -2012,6 +2074,9 @@ function backtest(
     goldActive: goldOn ? lastGoldOn : null,
     goldHolding: goldOn ? lastGoldHolding : null,
     goldLog: goldOn ? goldLog : null,
+    rebalCount,
+    bandApplied: bandActive,
+    bandPct: bandActive ? bandPctC : null,
   };
 }
 
@@ -2430,6 +2495,8 @@ function currentStrategyCfg() {
     goldSleevePct: clampGoldSleeve(state.goldSleevePct),
     goldLookback: state.goldLookback,
     goldCode: resolveGoldCode(state.goldCode),
+    bandOn: !!state.bandOn,
+    bandPct: clampBandPct(state.bandPct),
     dcaOn: state.dcaOn,
     initialCapital: state.initialCapital,
     monthlyAmount: state.monthlyAmount,
@@ -2579,6 +2646,8 @@ async function executePortBacktest(picks, start, end, cfg) {
     goldSleevePct: clampGoldSleeve(cfg.goldSleevePct),
     goldLookback: cfg.goldLookback,
     goldCode: resolveGoldCode(cfg.goldCode),
+    bandOn: !!cfg.bandOn,
+    bandPct: clampBandPct(cfg.bandPct),
   });
 }
 
@@ -2959,9 +3028,14 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
     state.weighting === "invVol"
       ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
       : "";
+  const bandNote = r.bandApplied
+    ? `<div class="warn">리밸런싱 밴드 · ±${(Number(r.bandPct) * 100).toFixed(0)}% · 리밸런싱 ${r.rebalCount != null ? r.rebalCount : "—"}회 · Q/Y/M 캘린더 무시·매일 드리프트 검사 · MOM/DMOM에는 미적용 · 과거 시뮬</div>`
+    : r.rebalCount != null && state.rebalance !== "N"
+      ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})</div>`
+      : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
@@ -3099,11 +3173,23 @@ document.addEventListener("DOMContentLoaded", () => {
     if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
     const gRow = $("#goldOnRow");
     if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
+    const bandRow = $("#bandRow");
+    if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
+    const bandHint = $("#bandHint");
+    if (bandHint) {
+      const mom = state.rebalance === "MOM" || state.rebalance === "DMOM";
+      bandHint.style.display = state.bandOn ? "block" : "none";
+      if (state.bandOn) {
+        bandHint.textContent = mom
+          ? "밴드 ON이어도 MOM/DMOM은 월간 교체 로직을 유지합니다(밴드 미적용)."
+          : "밴드 ON이면 Q/Y/M 캘린더를 쓰지 않고 매일 목표 대비 드리프트를 봅니다. |현재−목표| > 밴드(%)인 종목이 있으면 목표 비중으로 맞춥니다. DCA·국면헤지·금 슬리브 월초 강제 리밸런싱은 유지됩니다.";
+      }
+    }
     syncMomControls();
   };
   $("#rebalance").onchange = (e) => {
     state.rebalance = e.target.value;
-    syncMomControls();
+    syncStratControls();
   };
   const lb = $("#momLookback");
   if (lb)
@@ -3168,6 +3254,18 @@ document.addEventListener("DOMContentLoaded", () => {
       state.goldCode = resolveGoldCode(e.target.value);
     };
   }
+  const bandChk = $("#bandOn");
+  if (bandChk)
+    bandChk.onchange = (e) => {
+      state.bandOn = !!e.target.checked;
+      syncStratControls();
+    };
+  const bandPctEl = $("#bandPct");
+  if (bandPctEl)
+    bandPctEl.onchange = (e) => {
+      const v = Number(e.target.value);
+      state.bandPct = clampBandPct(Number.isFinite(v) ? v / 100 : BAND_PCT_DEFAULT);
+    };
   const maWin = $("#maWindow");
   if (maWin)
     maWin.onchange = (e) => {

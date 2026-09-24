@@ -753,6 +753,93 @@ def main():
                     fail(f"G1 futures month {entry.get('month')}: {GOLD_CODE_FUTURES} w={wgf}")
 
 
+
+    # --- Rebalancing band (Batch 4) ---
+    # Fixed-target modes only; daily drift vs last targets; MOM/DMOM ignore band.
+    from build_backtest import _clamp_band_pct, _band_drift_exceeds
+
+    if abs(_clamp_band_pct(0.05) - 0.05) > 1e-12:
+        fail("band default clamp")
+    if abs(_clamp_band_pct(0.001) - 0.01) > 1e-12:
+        fail("band min clamp")
+    if abs(_clamp_band_pct(0.5) - 0.10) > 1e-12:
+        fail("band max clamp")
+
+    bond_band = next((e["code"] for e in etfs if e.get("category") == "채권"), None)
+    if not bond_band:
+        fail("채권 ETF 없음 — 밴드 테스트 불가")
+    band_w = {"069500": 0.6, bond_band: 0.4}
+
+    b_cal = backtest(band_w, prices, start="2019-01-01", rebalance="Q", band_on=False)
+    b_wide = backtest(
+        band_w, prices, start="2019-01-01", rebalance="Q",
+        band_on=True, band_pct=0.10,
+    )
+    b_tight = backtest(
+        band_w, prices, start="2019-01-01", rebalance="Q",
+        band_on=True, band_pct=0.01,
+    )
+    if not b_wide.band_applied or b_cal.band_applied:
+        fail("band_applied flag mismatch")
+    if b_wide.band_pct is None or abs(b_wide.band_pct - 0.10) > 1e-12:
+        fail(f"band_pct not recorded: {b_wide.band_pct}")
+    # Tighter band should rebalance at least as often as a wide band
+    if b_tight.rebal_count < b_wide.rebal_count:
+        fail(
+            f"tight band rebal_count {b_tight.rebal_count} < wide {b_wide.rebal_count}"
+        )
+    # Wide band typically fewer (or equal) than quarterly calendar
+    if b_wide.rebal_count > b_cal.rebal_count + 5:
+        fail(
+            f"wide band rebal_count {b_wide.rebal_count} >> calendar Q {b_cal.rebal_count}"
+        )
+    # Continuity + weight sum after path: final value positive, mdd <= 0
+    if b_wide.final_value <= 0 or b_wide.mdd > 1e-12:
+        fail("band path invariant (value/mdd)")
+    if b_tight.curve[0][1] <= 0:
+        fail("band day0 non-positive")
+    # Day-0 match calendar vs band (same start allocation)
+    if abs(b_cal.curve[0][1] - b_wide.curve[0][1]) > 1e-9:
+        fail("band day-0 wealth mismatch vs calendar")
+
+    # Band + N (no calendar): still can rebalance on drift
+    b_n = backtest(
+        band_w, prices, start="2019-01-01", rebalance="N",
+        band_on=True, band_pct=0.01,
+    )
+    if not b_n.band_applied:
+        fail("band+N should apply band")
+    if b_n.rebal_count < 1:
+        fail("band+N tight should rebalance at least once on mixed port")
+
+    # MOM ignores band flag for trigger (band_applied False)
+    b_mom = backtest(
+        {"069500": 1.0},
+        prices,
+        start="2019-01-01",
+        rebalance="MOM",
+        mom_lookback=1,
+        mom_top_n=1,
+        mom_cost=0.0,
+        band_on=True,
+        band_pct=0.05,
+    )
+    if b_mom.band_applied:
+        fail("MOM must ignore band (band_applied should be False)")
+
+    # Drift helper: synthetic equal units at target → no breach; one-sided → breach
+    syn_prices = {
+        "A": {"2020-01-02": 100.0},
+        "B": {"2020-01-02": 100.0},
+    }
+    syn_units = {"A": 0.5, "B": 0.5}
+    syn_tw = {"A": 0.5, "B": 0.5}
+    if _band_drift_exceeds(syn_units, syn_prices, "2020-01-02", 100.0, syn_tw, 0.05):
+        fail("band helper false positive at target")
+    syn_units2 = {"A": 0.7, "B": 0.3}
+    if not _band_drift_exceeds(syn_units2, syn_prices, "2020-01-02", 100.0, syn_tw, 0.05):
+        fail("band helper false negative on 20pp drift")
+
     # Presets must never include inverse/leverage 114800 / 252670
     for name, w in PRESETS.items():
         if "114800" in w or "252670" in w:

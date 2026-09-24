@@ -45,6 +45,9 @@ class Stats:
     gold_active: bool | None = None
     gold_holding: str | None = None
     gold_log: list | None = None
+    rebal_count: int = 0
+    band_applied: bool = False
+    band_pct: float | None = None
 
 
 def load(codes: list[str] | None = None):
@@ -460,6 +463,46 @@ def _apply_gold_sleeve(
     return {c: w / tot for c, w in out.items() if w > 0}
 
 
+
+BAND_PCT_DEFAULT = 0.05
+BAND_PCT_MIN = 0.01
+BAND_PCT_MAX = 0.10
+
+
+def _clamp_band_pct(band_pct: float | None) -> float:
+    """Band half-width as fraction of portfolio (UI 1–10%, default 5%)."""
+    v = float(band_pct) if band_pct is not None else BAND_PCT_DEFAULT
+    if not math.isfinite(v):
+        v = BAND_PCT_DEFAULT
+    return min(BAND_PCT_MAX, max(BAND_PCT_MIN, v))
+
+
+def _band_drift_exceeds(
+    units: dict[str, float],
+    prices: dict,
+    d: str,
+    value: float,
+    target_tw: dict[str, float],
+    band_pct: float,
+) -> bool:
+    """True if any holding |current_w - target_w| > band (after MTM)."""
+    if value <= 0 or band_pct < 0:
+        return False
+    codes = set(units.keys()) | set(target_tw.keys())
+    for c in codes:
+        if c in units:
+            px = prices.get(c, {}).get(d)
+            if px is None or px <= 0:
+                continue
+            w = units[c] * px / value
+        else:
+            w = 0.0
+        t = float(target_tw.get(c, 0.0))
+        if abs(w - t) > band_pct + 1e-12:
+            return True
+    return False
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -485,6 +528,8 @@ def backtest(
     gold_sleeve_pct: float = GOLD_SLEEVE_DEFAULT,
     gold_lookback: int = 1,
     gold_code: str | None = None,
+    band_on: bool = False,
+    band_pct: float = BAND_PCT_DEFAULT,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -552,6 +597,9 @@ def backtest(
     mom_like = rebalance in ("MOM", "DMOM")
     gold_lb = 3 if int(gold_lookback) >= 3 else 1
     gold_sleeve = _clamp_gold_sleeve(gold_sleeve_pct)
+    # Band applies to fixed-target modes only; MOM/DMOM keep calendar monthly swaps.
+    band_active = bool(band_on) and not mom_like
+    band_pct_c = _clamp_band_pct(band_pct) if band_active else 0.0
 
     month_ends_codes = list(codes)
     if rebalance == "DMOM" and cash_code not in month_ends_codes:
@@ -588,6 +636,7 @@ def backtest(
     last_gold_holding: str | None = None
     gold_log: list[dict] = []
     prev_gold_state: bool | None = None
+    rebal_count = 0
 
     def _target_weights(d: str) -> tuple[dict[str, float], list[str], bool | None]:
         nonlocal last_regime, last_hedge, last_gold_on, last_gold_holding
@@ -661,7 +710,12 @@ def backtest(
                 rets.append((d, value / prev_value - 1.0))
 
             # 2) Monthly DCA cash inflow on first trading day of new month
-            do_rebal = _is_rebal(prev, d, rebalance)
+            # Band mode: ignore Q/Y/M calendar; check drift daily vs last targets.
+            # MOM/DMOM: band_active is False → keep monthly calendar.
+            if band_active:
+                do_rebal = False
+            else:
+                do_rebal = _is_rebal(prev, d, rebalance)
             # 국면 헤지(실험): 헤지 슬리브는 월 1회만 갱신
             if regime_hedge and _is_new_month(prev, d):
                 do_rebal = True
@@ -673,9 +727,15 @@ def backtest(
                 total_invested += monthly_contribution
                 contributions += 1
                 do_rebal = True  # deploy cash to target weights
+            # Band drift (after MTM / optional DCA cash): any |w-target| > band
+            if band_active and _band_drift_exceeds(
+                units, prices, d, value, current_tw, band_pct_c
+            ):
+                do_rebal = True
 
             # 3) Rebalance after MTM (+ optional cash)
             if do_rebal:
+                rebal_count += 1
                 new_tw, new_active, g_state = _target_weights(d)
                 new_set = set(new_active)
                 if mom_like and prev_holdings is not None and new_set != prev_holdings and cost > 0:
@@ -787,6 +847,9 @@ def backtest(
         gold_active=last_gold_on if gold_on else None,
         gold_holding=last_gold_holding if gold_on else None,
         gold_log=gold_log if gold_on else None,
+        rebal_count=rebal_count,
+        band_applied=band_active,
+        band_pct=band_pct_c if band_active else None,
     )
 
 
