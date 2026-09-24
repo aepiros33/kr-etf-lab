@@ -1,7 +1,14 @@
-/** Exported for reviewer parity docs; weights must sum to 100. */
+/** Exported for reviewer parity docs; weights must sum to 100.
+ * longProxy: remapped to longer-history tickers (10y+). Do not invent new holdings — label only.
+ * Common remaps: 360750→133690, cash/KOFR→153130, gold spot→132030, income/semi→broad proxies.
+ */
+const PRESET_PROXY_TIP =
+  "10년+용 장기 대용 — 원 의도(단기 상장 ETF)와 보유 구성이 다름. 과거 시뮬용 프록시.";
 const PRESETS = {
   kAllWeather: {
     label: "🛡️ K-올웨더",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: S&P·US채권·금현물·KOFR → 나스닥100·국고채·금선물·단기채)",
     w: {
       "069500": 15,
       "133690": 17.5,
@@ -13,6 +20,8 @@ const PRESETS = {
   },
   permanent: {
     label: "🏛️ 영구 포트폴리오",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: S&P·US채권·금현물·KOFR → 나스닥100·국고채3년·금선물·단기채)",
     w: {
       "069500": 12.5,
       "133690": 12.5,
@@ -24,6 +33,8 @@ const PRESETS = {
   },
   global6040: {
     label: "📈 글로벌 60/40",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: 360750·453850 → 133690·148070)",
     w: {
       "133690": 40,
       "069500": 20,
@@ -32,6 +43,8 @@ const PRESETS = {
   },
   monthlyIncome: {
     label: "💵 월배당 인컴형",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (월배당 테마 대신 한미주식·국고채·단기채 장기 대용)",
     w: {
       "133690": 30,
       "069500": 20,
@@ -41,6 +54,8 @@ const PRESETS = {
   },
   goldenButterfly: {
     label: "🦋 골든버터플라이",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: 코스닥·금현물 → 나스닥100·금선물)",
     w: {
       "069500": 20,
       "133690": 20,
@@ -51,6 +66,8 @@ const PRESETS = {
   },
   growth80: {
     label: "🚀 성장 80/20",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: S&P 비중을 나스닥100 장기로 통합)",
     w: {
       "133690": 60,
       "069500": 20,
@@ -59,6 +76,8 @@ const PRESETS = {
   },
   koreaUs: {
     label: "🇰🇷🇺🇸 한미 분산",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (예: 코스닥·S&P → 코스피200·나스닥100)",
     w: {
       "069500": 35,
       "133690": 30,
@@ -68,6 +87,8 @@ const PRESETS = {
   },
   divGrowth: {
     label: "📈 배당성장",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (배당성장 테마 대신 코스피·나스닥·국고채·단기채)",
     w: {
       "069500": 50,
       "133690": 20,
@@ -77,6 +98,8 @@ const PRESETS = {
   },
   semiDefensive: {
     label: "🛡️ 반도체+방어",
+    longProxy: true,
+    proxyTip: PRESET_PROXY_TIP + " (반도체 테마·금현물 → 코스피200·금선물·국고채·단기채)",
     w: {
       "069500": 40,
       "148070": 25,
@@ -137,6 +160,9 @@ const state = {
   lastBenchCurve: null,
   search: "",
   category: "전체",
+  /** Structure filters (OR when any on): hedged / futures / spot */
+  structFilters: { hedged: false, futures: false, spot: false },
+  pricesAsOf: null,
   dcaOn: false,
   initialCapital: 10_000_000,
   monthlyAmount: 500_000,
@@ -146,6 +172,52 @@ const state = {
   pensionTaxRate: 0.044,
 };
 const $ = (s) => document.querySelector(s);
+
+/** Derive FX-hedge / futures / spot from name when meta lacks dedicated fields.
+ * Rules (name only, no invented prices):
+ *  - 환헤지(H): includes "환헤지" or "(H)" / "（H）"
+ *  - 선물: includes "선물"
+ *  - 현물: includes "현물" (spot/physical)
+ */
+function etfStructureFlags(etf) {
+  const n = etf.name || "";
+  return {
+    hedged: /환헤지|\(H\)|（H）/.test(n),
+    futures: n.includes("선물"),
+    spot: n.includes("현물"),
+  };
+}
+
+/** Max trading date from etf_prices bundle (or meta etf.end / as_of). */
+function resolvePricesAsOf(meta, bundle) {
+  if (bundle && bundle.as_of) return String(bundle.as_of).slice(0, 10);
+  if (meta && meta.as_of) return String(meta.as_of).slice(0, 10);
+  let mx = null;
+  const consider = (d) => {
+    if (d && (!mx || d > mx)) mx = d;
+  };
+  if (meta && Array.isArray(meta.etfs)) {
+    for (const e of meta.etfs) consider(e.end);
+  }
+  if (bundle && bundle.prices) {
+    for (const rows of Object.values(bundle.prices)) {
+      if (rows && rows.length) consider(rows[rows.length - 1].d);
+    }
+  }
+  return mx;
+}
+
+function structureBadgeHtml(flags) {
+  const bits = [];
+  if (flags.hedged)
+    bits.push('<span class="etf-badge hedged" title="환헤지(H)">환헤지(H)</span>');
+  if (flags.futures)
+    bits.push('<span class="etf-badge futures" title="선물 기반">선물</span>');
+  if (flags.spot)
+    bits.push('<span class="etf-badge spot" title="현물/실물">현물</span>');
+  return bits.length ? `<span class="etf-badges">${bits.join("")}</span>` : "";
+}
+
 
 function pct(n, digits = 1) {
   if (n == null || Number.isNaN(n)) return "—";
@@ -301,9 +373,12 @@ async function boot() {
   }
 
   state.meta = meta;
-  $("#stamp").textContent = `시세 갱신 ${meta.generatedAt}\n${meta.source}\n메타 ${meta.etfs.length}종`;
+  state.pricesAsOf = resolvePricesAsOf(meta, state._priceBundle);
+  const asOfLine = state.pricesAsOf ? `시세 기준일 ${state.pricesAsOf}\n` : "";
+  $("#stamp").textContent = `${asOfLine}시세 갱신 ${meta.generatedAt}\n${meta.source}\n메타 ${meta.etfs.length}종`;
   renderPresets();
   renderCatFilters();
+  renderStructFilters();
   renderList();
   await applyPreset("kAllWeather");
 }
@@ -313,9 +388,14 @@ function renderPresets() {
   box.innerHTML = "";
   Object.entries(PRESETS).forEach(([k, p]) => {
     const b = document.createElement("button");
-    b.className = "chip";
+    b.className = "chip" + (p.longProxy ? " proxy" : "");
     b.dataset.key = k;
-    b.textContent = p.label;
+    b.title = p.proxyTip || (p.longProxy ? PRESET_PROXY_TIP : "");
+    if (p.longProxy) {
+      b.innerHTML = `${p.label} <span class="proxy-tag" title="${b.title}">10년+용 장기 대용</span>`;
+    } else {
+      b.textContent = p.label;
+    }
     b.onclick = () => applyPreset(k);
     box.appendChild(b);
   });
@@ -331,6 +411,32 @@ function renderCatFilters() {
     b.onclick = () => {
       state.category = cat;
       renderCatFilters();
+      renderList();
+    };
+    box.appendChild(b);
+  });
+}
+
+const STRUCT_FILTERS = [
+  { key: "hedged", label: "환헤지(H)" },
+  { key: "futures", label: "선물" },
+  { key: "spot", label: "현물" },
+];
+
+function renderStructFilters() {
+  const box = $("#structFilters");
+  if (!box) return;
+  box.innerHTML = "";
+  STRUCT_FILTERS.forEach(({ key, label }) => {
+    const b = document.createElement("button");
+    const on = !!state.structFilters[key];
+    b.className = "chip" + (on ? " active" : "");
+    b.type = "button";
+    b.textContent = label;
+    b.title = on ? `${label} 필터 켜짐 (OR)` : `${label}만 보기`;
+    b.onclick = () => {
+      state.structFilters[key] = !state.structFilters[key];
+      renderStructFilters();
       renderList();
     };
     box.appendChild(b);
@@ -387,8 +493,18 @@ function clearSelection() {
 
 function filteredEtfs() {
   const q = state.search.trim().toLowerCase();
+  const sf = state.structFilters || {};
+  const anyStruct = !!(sf.hedged || sf.futures || sf.spot);
   return state.meta.etfs.filter((etf) => {
     if (state.category !== "전체" && etf.category !== state.category) return false;
+    if (anyStruct) {
+      const flags = etfStructureFlags(etf);
+      const hit =
+        (sf.hedged && flags.hedged) ||
+        (sf.futures && flags.futures) ||
+        (sf.spot && flags.spot);
+      if (!hit) return false;
+    }
     if (!q) return true;
     const hay = `${etf.name} ${etf.code} ${etf.issuer} ${etf.blurb || ""}`.toLowerCase();
     return hay.includes(q);
@@ -416,7 +532,9 @@ function renderList() {
     const el = document.createElement("div");
     el.className = "etf" + (on ? " on" : "") + (etf.leveraged ? " lev" : "");
     const levTag = etf.leveraged ? " · 레버리지/인버스" : "";
-    el.innerHTML = `<div class="etf-head"><input type="checkbox" ${on ? "checked" : ""} data-code="${etf.code}" /><div><div class="etf-name">${etf.name}</div><div class="etf-code">${etf.code} · ${etf.issuer}${levTag} · ${etf.start || "?"}~</div></div><span class="cat">${etf.category}</span></div><div class="weight-row" style="${on ? "" : "display:none"}"><input type="range" min="0" max="100" value="${state.selected[etf.code] || 0}" data-range="${etf.code}" /><div class="wnum">${state.selected[etf.code] || 0}%</div></div>`;
+    const flags = etfStructureFlags(etf);
+    const badgeHtml = structureBadgeHtml(flags);
+    el.innerHTML = `<div class="etf-head"><input type="checkbox" ${on ? "checked" : ""} data-code="${etf.code}" /><div><div class="etf-name">${etf.name}${badgeHtml}</div><div class="etf-code">${etf.code} · ${etf.issuer}${levTag} · ${etf.start || "?"}~</div></div><span class="cat">${etf.category}</span></div><div class="weight-row" style="${on ? "" : "display:none"}"><input type="range" min="0" max="100" value="${state.selected[etf.code] || 0}" data-range="${etf.code}" /><div class="wnum">${state.selected[etf.code] || 0}%</div></div>`;
     el.querySelector("input[type=checkbox]").onchange = async (e) => {
       if (e.target.checked) {
         await ensurePrices([etf.code]);

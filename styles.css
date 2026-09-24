@@ -238,3 +238,47 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
 .mom-row { margin-top: 6px; }
 .mom-row .field { flex: 1; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 #momHoldings table td { font-size: 12px; }
+
+/* Preset long-proxy tag */
+.chip.proxy { border-color: rgba(125,211,192,.35); }
+.proxy-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  background: rgba(125,211,192,.12);
+  border: 1px solid rgba(125,211,192,.35);
+  vertical-align: middle;
+}
+
+/* ETF structure badges + filter chips */
+.struct-filters { margin-top: -4px; margin-bottom: 8px; }
+.etf-badges { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.etf-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 800;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.etf-badge.hedged {
+  color: #9ecbff;
+  background: rgba(110,168,255,.14);
+  border: 1px solid rgba(110,168,255,.4);
+}
+.etf-badge.futures {
+  color: #f0c27a;
+  background: rgba(240,194,122,.12);
+  border: 1px solid rgba(240,194,122,.4);
+}
+.etf-badge.spot {
+  color: #b8e0c8;
+  background: rgba(125,211,192,.1);
+  border: 1px solid rgba(125,211,192,.35);
+}

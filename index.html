@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=periodfix1" />
+  <link rel="stylesheet" href="./styles.css?v=batch1ui1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -22,7 +22,7 @@
       <aside class="card pad sidebar">
         <div class="section-title">프리셋</div>
         <div class="presets" id="presets"></div>
-        <p class="muted-note" id="presetProxyNote">프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130). 2014년 이전 등은 Yahoo 종가 병합 가능. 과거 시뮬 · 투자 자문 아님.</p>
+        <p class="muted-note" id="presetProxyNote">프리셋 칩의 「10년+용 장기 대용」은 원 의도(단기 상장 ETF)와 보유가 다른 장기 시세 프록시입니다(예: 360750→133690, 현금→153130, 금현물→금선물). 보유를 새로 만들지 않고 표시만 합니다. Yahoo 종가 병합 가능. 과거 시뮬 · 투자 자문 아님.</p>
         <div class="row">
           <select id="period">
             <option value="1y">1년</option>
@@ -192,6 +192,8 @@
           <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
         </div>
         <div class="cats" id="catFilters"></div>
+        <div class="cats struct-filters" id="structFilters" aria-label="구조 필터"></div>
+        <p class="muted-note">구조 뱃지: 환헤지(H)·선물·현물은 종목명 패턴(환헤지/(H), 선물, 현물)으로 표시·필터합니다.</p>
 
         <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
         <div class="etf-list" id="etfList"></div>
@@ -214,6 +216,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=periodfix1"></script>
+  <script src="./app.js?v=batch1ui1"></script>
 </body>
 </html>
