@@ -1094,7 +1094,207 @@ def rolling_cagr(curve, window: int = 756):
     }
 
 
+# Start-date sensitivity heatmap (Batch 6): fixed end, vary start months.
+SENSITIVITY_MAX_STARTS = 120
+SENSITIVITY_MIN_DAYS = 20
+
+
+def _sensitivity_calendar_codes(
+    weights: dict,
+    rebalance: str = "Q",
+    cash_code: str = "153130",
+    ma_overlay: bool = False,
+    regime_hedge: bool = False,
+    regime_hedge_mode: str = "inverse",
+    regime_hedge_code: str = "114800",
+    gold_on: bool = False,
+    gold_code: str = "132030",
+) -> list[str]:
+    """Codes whose intersection defines the common trading calendar (mirrors backtest)."""
+    codes = [c for c, w in weights.items() if w and w > 0]
+    need_cash = rebalance == "DMOM" or ma_overlay or (regime_hedge and regime_hedge_mode == "cash")
+    out = list(codes)
+    if need_cash and cash_code not in out:
+        out.append(cash_code)
+    if regime_hedge:
+        for extra in ("069500", "133690", regime_hedge_code if regime_hedge_mode != "cash" else cash_code):
+            if extra and extra not in out:
+                out.append(extra)
+    if gold_on:
+        g = gold_code if gold_code in ("411060", "132030") else "132030"
+        for extra in (g, GOLD_CASH):
+            if extra not in out:
+                out.append(extra)
+    return out
+
+
+def _common_dates_for_codes(codes: list[str], prices: dict, end: str) -> list[str]:
+    sets = []
+    for c in codes:
+        series = prices.get(c) or {}
+        sets.append({d for d in series if d <= end})
+    if not sets:
+        return []
+    common = set.intersection(*sets) if len(sets) > 1 else set(sets[0])
+    return sorted(d for d in common if d)
+
+
+def _month_first_candidates(common: list[str], min_days: int = SENSITIVITY_MIN_DAYS) -> list[tuple[str, str]]:
+    """(ym, first_trading_date) for each month with >= min_days remaining to end."""
+    if not common:
+        return []
+    first_by_ym: dict[str, str] = {}
+    for d in common:
+        ym = d[:7]
+        if ym not in first_by_ym:
+            first_by_ym[ym] = d
+    n = len(common)
+    # index of each date for remaining-day check
+    idx = {d: i for i, d in enumerate(common)}
+    out = []
+    for ym in sorted(first_by_ym.keys()):
+        d0 = first_by_ym[ym]
+        i0 = idx[d0]
+        # days on curve after start ≈ n - 1 - i0 (same as backtest days)
+        if (n - 1 - i0) >= min_days:
+            out.append((ym, d0))
+    return out
+
+
+def _subsample_starts(
+    candidates: list[tuple[str, str]], max_starts: int = SENSITIVITY_MAX_STARTS
+) -> tuple[list[tuple[str, str]], str]:
+    """Cap runs: all monthly if under cap; else densest recent monthly window.
+
+    If still too many after taking a recent window and the span is long, fall
+    back to quarterly then yearly then even sample.
+    """
+    if len(candidates) <= max_starts:
+        return candidates, "monthly"
+    # Prefer a contiguous recent monthly block (heatmap stays dense).
+    if max_starts >= 12:
+        return candidates[-max_starts:], "monthly_recent"
+    quarterly = [(ym, d) for ym, d in candidates if int(ym[5:7]) in (1, 4, 7, 10)]
+    if len(quarterly) <= max_starts and len(quarterly) >= 2:
+        return quarterly[-max_starts:], "quarterly"
+    yearly = [(ym, d) for ym, d in candidates if ym.endswith("-01")]
+    if len(yearly) <= max_starts and len(yearly) >= 2:
+        return yearly[-max_starts:], "yearly"
+    n = len(candidates)
+    if max_starts <= 1:
+        return [candidates[-1]], "sampled"
+    idxs = sorted({round(i * (n - 1) / (max_starts - 1)) for i in range(max_starts)})
+    return [candidates[i] for i in idxs], "sampled"
+
+
+def start_date_sensitivity(
+    weights: dict,
+    prices: dict,
+    end: str,
+    rebalance: str = "Q",
+    initial_capital: float = 1.0,
+    monthly_contribution: float = 0.0,
+    max_starts: int = SENSITIVITY_MAX_STARTS,
+    min_days: int = SENSITIVITY_MIN_DAYS,
+    **bt_kwargs,
+) -> dict:
+    """Ending-window CAGR/MDD across many start months (fixed end).
+
+    Reuses ``backtest`` with varying ``start``. Returns a year×month grid of cells.
+    Past simulation only — not advice.
+    """
+    cal = _sensitivity_calendar_codes(
+        weights,
+        rebalance=rebalance,
+        cash_code=bt_kwargs.get("cash_code", "153130"),
+        ma_overlay=bool(bt_kwargs.get("ma_overlay", False)),
+        regime_hedge=bool(bt_kwargs.get("regime_hedge", False)),
+        regime_hedge_mode=bt_kwargs.get("regime_hedge_mode", "inverse"),
+        regime_hedge_code=bt_kwargs.get("regime_hedge_code", "114800"),
+        gold_on=bool(bt_kwargs.get("gold_on", False)),
+        gold_code=bt_kwargs.get("gold_code", "132030"),
+    )
+    missing = [c for c in cal if c not in prices]
+    if missing:
+        return {
+            "error": f"시세 없음: {', '.join(missing)}",
+            "end": end,
+            "cells": [],
+            "mode": None,
+            "candidateCount": 0,
+            "runCount": 0,
+        }
+    common = _common_dates_for_codes(cal, prices, end)
+    if len(common) < min_days + 1:
+        return {
+            "error": "공통 거래일이 너무 짧습니다.",
+            "end": end,
+            "cells": [],
+            "mode": None,
+            "candidateCount": 0,
+            "runCount": 0,
+        }
+    # Align end to last common date
+    fixed_end = common[-1]
+    candidates = _month_first_candidates(common, min_days=min_days)
+    selected, mode = _subsample_starts(candidates, max_starts=max_starts)
+    cells = []
+    for ym, d0 in selected:
+        try:
+            s = backtest(
+                weights,
+                prices,
+                start=d0,
+                end=fixed_end,
+                rebalance=rebalance,
+                initial_capital=initial_capital,
+                monthly_contribution=monthly_contribution,
+                **bt_kwargs,
+            )
+        except Exception as e:  # noqa: BLE001 — surface as cell error
+            cells.append(
+                {
+                    "ym": ym,
+                    "year": int(ym[:4]),
+                    "month": int(ym[5:7]),
+                    "start": d0,
+                    "end": fixed_end,
+                    "cagr": None,
+                    "mdd": None,
+                    "days": 0,
+                    "error": str(e),
+                }
+            )
+            continue
+        cells.append(
+            {
+                "ym": ym,
+                "year": int(ym[:4]),
+                "month": int(ym[5:7]),
+                "start": s.start,
+                "end": s.end,
+                "cagr": s.cagr,
+                "mdd": s.mdd,
+                "days": s.days,
+                "error": None,
+            }
+        )
+    years = sorted({c["year"] for c in cells}) if cells else []
+    return {
+        "error": None,
+        "end": fixed_end,
+        "cells": cells,
+        "mode": mode,
+        "candidateCount": len(candidates),
+        "runCount": len(selected),
+        "years": years,
+        "minDays": min_days,
+        "maxStarts": max_starts,
+    }
+
+
 def main():
+
     raw, prices = load()
     sample = {"069500": 0.4, "133690": 0.3, "148070": 0.2, "132030": 0.1}
     available = {k: v for k, v in sample.items() if k in prices}

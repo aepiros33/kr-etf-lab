@@ -130,6 +130,11 @@ const CAT_YIELD = {
 
 const ROLLING_WINDOWS = { "1y": 252, "3y": 756, "5y": 1260, "10y": 2520 };
 
+/** Batch 6: start-date sensitivity (mirror agents/build_backtest). */
+const SENSITIVITY_MAX_STARTS = 120;
+const SENSITIVITY_MIN_DAYS = 20;
+const SENSITIVITY_CHUNK = 8;
+
 const state = {
   meta: null,
   prices: {},
@@ -160,6 +165,11 @@ const state = {
   ddChart: null,
   rollingChart: null,
   rollingWindow: "3y",
+  /** Batch 6: start-date sensitivity heatmap */
+  sensitivityMetric: "cagr", // cagr | mdd
+  sensitivityResult: null,
+  sensitivityToken: 0,
+  sensitivityRunning: false,
   lastPortCurve: null,
   lastBenchCurve: null,
   search: "",
@@ -1476,6 +1486,9 @@ async function run() {
   state.lastRun = result.error
     ? null
     : { result, picks, bench, corr, tax: taxView, windowInfo, requestedStart: start, requestedEnd: end };
+  state.sensitivityToken += 1;
+  state.sensitivityRunning = false;
+  state.sensitivityResult = null;
   renderResult(result, bench, picks, corr, taxView, windowInfo);
 }
 
@@ -2315,6 +2328,165 @@ function rollingCagr(curve, window = 756) {
   };
 }
 
+/** Mirror agents/build_backtest._sensitivity_calendar_codes — numbers only. */
+function sensitivityCalendarCodes(weights, cfg) {
+  const codes = Object.keys(weights).filter((c) => weights[c] > 0);
+  const rebalance = cfg.rebalance || "Q";
+  const cashCode = cfg.cashCode || "153130";
+  const needCash =
+    rebalance === "DMOM" ||
+    !!cfg.maOverlay ||
+    (!!cfg.regimeHedge && cfg.regimeHedgeMode === "cash");
+  const out = [...codes];
+  if (needCash && !out.includes(cashCode)) out.push(cashCode);
+  if (cfg.regimeHedge) {
+    const hedge =
+      cfg.regimeHedgeMode === "cash" ? cashCode : cfg.regimeHedgeCode || "114800";
+    for (const extra of [REGIME_HEDGE_A || "069500", REGIME_HEDGE_B || "133690", hedge]) {
+      if (extra && !out.includes(extra)) out.push(extra);
+    }
+  }
+  if (cfg.goldOn) {
+    const g = resolveGoldCode(cfg.goldCode);
+    for (const extra of [g, GOLD_CASH]) {
+      if (!out.includes(extra)) out.push(extra);
+    }
+  }
+  return out;
+}
+
+/** Mirror agents/build_backtest._common_dates_for_codes. */
+function commonDatesForCodes(codes, priceMap, end) {
+  const sets = codes.map(
+    (c) => new Set(Object.keys(priceMap[c] || {}).filter((d) => d <= end))
+  );
+  if (!sets.length) return [];
+  let common = [...sets[0]];
+  for (const s of sets.slice(1)) common = common.filter((d) => s.has(d));
+  common.sort();
+  return common;
+}
+
+/** Mirror agents/build_backtest._month_first_candidates. */
+function monthFirstCandidates(common, minDays = SENSITIVITY_MIN_DAYS) {
+  if (!common.length) return [];
+  const firstByYm = {};
+  for (const d of common) {
+    const ym = d.slice(0, 7);
+    if (!firstByYm[ym]) firstByYm[ym] = d;
+  }
+  const n = common.length;
+  const idx = Object.fromEntries(common.map((d, i) => [d, i]));
+  const out = [];
+  for (const ym of Object.keys(firstByYm).sort()) {
+    const d0 = firstByYm[ym];
+    const i0 = idx[d0];
+    if (n - 1 - i0 >= minDays) out.push({ ym, d0 });
+  }
+  return out;
+}
+
+/** Mirror agents/build_backtest._subsample_starts. */
+function subsampleStarts(candidates, maxStarts = SENSITIVITY_MAX_STARTS) {
+  if (candidates.length <= maxStarts) return { selected: candidates, mode: "monthly" };
+  if (maxStarts >= 12) {
+    return { selected: candidates.slice(-maxStarts), mode: "monthly_recent" };
+  }
+  const quarterly = candidates.filter((c) => [1, 4, 7, 10].includes(Number(c.ym.slice(5, 7))));
+  if (quarterly.length <= maxStarts && quarterly.length >= 2) {
+    return { selected: quarterly.slice(-maxStarts), mode: "quarterly" };
+  }
+  const yearly = candidates.filter((c) => c.ym.endsWith("-01"));
+  if (yearly.length <= maxStarts && yearly.length >= 2) {
+    return { selected: yearly.slice(-maxStarts), mode: "yearly" };
+  }
+  const n = candidates.length;
+  if (maxStarts <= 1) return { selected: [candidates[n - 1]], mode: "sampled" };
+  const idxs = [
+    ...new Set(
+      Array.from({ length: maxStarts }, (_, i) => Math.round((i * (n - 1)) / (maxStarts - 1)))
+    ),
+  ].sort((a, b) => a - b);
+  return { selected: idxs.map((i) => candidates[i]), mode: "sampled" };
+}
+
+/**
+ * Mirror agents/build_backtest.start_date_sensitivity — sync, numbers only.
+ * Prefer runSensitivityAsync in UI so the page does not freeze.
+ */
+function startDateSensitivity(weights, priceMap, end, rebalance, initial, monthly, opts, limits) {
+  const maxStarts = (limits && limits.maxStarts) || SENSITIVITY_MAX_STARTS;
+  const minDays = (limits && limits.minDays) || SENSITIVITY_MIN_DAYS;
+  const cfg = { ...(opts || {}), rebalance };
+  const cal = sensitivityCalendarCodes(weights, cfg);
+  const missing = cal.filter((c) => !priceMap[c]);
+  if (missing.length) {
+    return {
+      error: `시세 없음: ${missing.join(", ")}`,
+      end,
+      cells: [],
+      mode: null,
+      candidateCount: 0,
+      runCount: 0,
+    };
+  }
+  const common = commonDatesForCodes(cal, priceMap, end);
+  if (common.length < minDays + 1) {
+    return {
+      error: "공통 거래일이 너무 짧습니다.",
+      end,
+      cells: [],
+      mode: null,
+      candidateCount: 0,
+      runCount: 0,
+    };
+  }
+  const fixedEnd = common[common.length - 1];
+  const candidates = monthFirstCandidates(common, minDays);
+  const { selected, mode } = subsampleStarts(candidates, maxStarts);
+  const cells = [];
+  for (const { ym, d0 } of selected) {
+    const s = backtest(weights, priceMap, d0, fixedEnd, rebalance, initial, monthly, opts || {});
+    if (s.error) {
+      cells.push({
+        ym,
+        year: Number(ym.slice(0, 4)),
+        month: Number(ym.slice(5, 7)),
+        start: d0,
+        end: fixedEnd,
+        cagr: null,
+        mdd: null,
+        days: 0,
+        error: s.error,
+      });
+      continue;
+    }
+    cells.push({
+      ym,
+      year: Number(ym.slice(0, 4)),
+      month: Number(ym.slice(5, 7)),
+      start: s.start,
+      end: s.end,
+      cagr: s.cagr,
+      mdd: s.mdd,
+      days: s.days,
+      error: null,
+    });
+  }
+  const years = [...new Set(cells.map((c) => c.year))].sort((a, b) => a - b);
+  return {
+    error: null,
+    end: fixedEnd,
+    cells,
+    mode,
+    candidateCount: candidates.length,
+    runCount: selected.length,
+    years,
+    minDays,
+    maxStarts,
+  };
+}
+
 function destroyExtraCharts() {
   if (state.ddChart) {
     state.ddChart.destroy();
@@ -2528,6 +2700,328 @@ function wireRollingChips() {
 }
 
 
+
+/* ===== Batch 6: 시작일 민감도 히트맵 ===== */
+
+function modeLabelKo(mode) {
+  return (
+    {
+      monthly: "매월 시작",
+      monthly_recent: "최근 구간 매월 시작",
+      quarterly: "분기 시작",
+      yearly: "연초 시작",
+      sampled: "표본 시작",
+    }[mode] || mode || "—"
+  );
+}
+
+function heatColorCagr(v, absMax) {
+  if (v == null || Number.isNaN(v)) return "rgba(39,49,64,.35)";
+  const m = absMax > 0 ? absMax : 0.2;
+  const t = Math.max(-1, Math.min(1, v / m));
+  if (t >= 0) {
+    const a = 0.15 + 0.55 * t;
+    return `rgba(125,211,192,${a.toFixed(3)})`;
+  }
+  const a = 0.15 + 0.55 * -t;
+  return `rgba(255,107,122,${a.toFixed(3)})`;
+}
+
+function heatColorMdd(v, minMdd) {
+  if (v == null || Number.isNaN(v)) return "rgba(39,49,64,.35)";
+  // v ≤ 0; deeper red for worse MDD
+  const floor = minMdd < 0 ? minMdd : -0.5;
+  const t = floor < 0 ? Math.min(1, v / floor) : 0; // 0..1
+  const a = 0.12 + 0.65 * t;
+  return `rgba(255,107,122,${a.toFixed(3)})`;
+}
+
+function sensitivityAbsMax(cells, metric) {
+  if (metric === "mdd") {
+    let mn = 0;
+    for (const c of cells) {
+      if (c.mdd != null && c.mdd < mn) mn = c.mdd;
+    }
+    return mn;
+  }
+  let mx = 0;
+  for (const c of cells) {
+    if (c.cagr != null && Math.abs(c.cagr) > mx) mx = Math.abs(c.cagr);
+  }
+  return mx || 0.2;
+}
+
+function renderSensitivityCard(partial) {
+  const res = partial || state.sensitivityResult;
+  const running = state.sensitivityRunning;
+  const metric = state.sensitivityMetric || "cagr";
+  let body = "";
+  if (running && (!res || !res.cells || !res.cells.length)) {
+    body = `<div class="sens-progress" id="sensProgress"><div class="sens-bar" style="width:2%"></div></div>
+      <p class="muted-note">시작월별 백테스트 계산 중…</p>`;
+  } else if (res && res.error) {
+    body = `<div class="warn">${res.error}</div>`;
+  } else if (res && res.cells && res.cells.length) {
+    const byYm = Object.fromEntries(res.cells.map((c) => [c.ym, c]));
+    const years = (res.years && res.years.length
+      ? res.years
+      : [...new Set(res.cells.map((c) => c.year))]
+    ).slice().sort((a, b) => a - b);
+    const scale = sensitivityAbsMax(res.cells, metric);
+    const head = `<tr><th>연도</th>${Array.from({ length: 12 }, (_, i) => `<th>${i + 1}</th>`).join("")}</tr>`;
+    const rows = years
+      .map((y) => {
+        const cells = Array.from({ length: 12 }, (_, i) => {
+          const ym = `${y}-${String(i + 1).padStart(2, "0")}`;
+          const c = byYm[ym];
+          if (!c || c.error || (metric === "cagr" ? c.cagr == null : c.mdd == null)) {
+            return `<td class="sens-empty" title="${ym}">·</td>`;
+          }
+          const val = metric === "mdd" ? c.mdd : c.cagr;
+          const bg =
+            metric === "mdd" ? heatColorMdd(val, scale) : heatColorCagr(val, scale);
+          const title = `${c.start}~${c.end} · CAGR ${pct(c.cagr)} · MDD ${pct(c.mdd)} · ${c.days}일`;
+          return `<td class="sens-cell" style="background:${bg}" title="${title}"><span>${pct(val, 1)}</span></td>`;
+        }).join("");
+        return `<tr><th>${y}</th>${cells}</tr>`;
+      })
+      .join("");
+    const progress =
+      running
+        ? `<div class="sens-progress" id="sensProgress"><div class="sens-bar" id="sensBar" style="width:${Math.min(99, ((res.cells.length / (res.runCount || 1)) * 100)).toFixed(0)}%"></div></div>`
+        : "";
+    body = `${progress}
+      <div class="sens-toolbar">
+        <div class="rolling-chips" id="sensMetricChips">
+          <button type="button" class="chip${metric === "cagr" ? " active" : ""}" data-sens-metric="cagr">CAGR</button>
+          <button type="button" class="chip${metric === "mdd" ? " active" : ""}" data-sens-metric="mdd">MDD</button>
+        </div>
+        <div class="sens-meta">${modeLabelKo(res.mode)} · ${res.runCount}/${res.candidateCount}회 · 종료 ${res.end}</div>
+      </div>
+      <div class="sens-wrap"><table class="sens-table"><thead>${head}</thead><tbody>${rows}</tbody></table></div>
+      <div class="warn">같은 설정·고정 종료일에서 시작월만 바꾼 과거 시뮬입니다. 격자 색은 ${
+        metric === "mdd" ? "MDD(낙폭)" : "연환산 수익률(CAGR)"
+      } 기준입니다. 과거≠미래 · 투자 자문 아님.</div>`;
+  } else {
+    body = `<p class="muted-note">버튼을 누르면 현재 포트 설정으로 시작월별 종료창 CAGR·MDD를 계산합니다. 자동 실행하지 않습니다.</p>`;
+  }
+  return `<div class="card pad sens-card" id="sensCard">
+    <div class="section-title">시작일 민감도 히트맵</div>
+    <div class="btn-row sens-actions">
+      <button type="button" class="primary" id="btnSensitivity" ${running ? "disabled" : ""}>${
+        running ? "계산 중…" : "민감도 보기"
+      }</button>
+    </div>
+    <div id="sensBody">${body}</div>
+  </div>`;
+}
+
+function wireSensitivityCard() {
+  const btn = $("#btnSensitivity");
+  if (btn) {
+    btn.onclick = () => {
+      runSensitivityAsync().catch((err) => {
+        state.sensitivityRunning = false;
+        const body = $("#sensBody");
+        if (body) body.innerHTML = `<div class="warn">${String(err.message || err)}</div>`;
+        btn.disabled = false;
+        btn.textContent = "민감도 보기";
+      });
+    };
+  }
+  const chips = $("#sensMetricChips");
+  if (chips) {
+    chips.querySelectorAll("[data-sens-metric]").forEach((el) => {
+      el.onclick = () => {
+        state.sensitivityMetric = el.getAttribute("data-sens-metric");
+        const host = $("#sensCard");
+        if (host) {
+          const parent = host.parentElement;
+          const html = renderSensitivityCard();
+          host.outerHTML = html;
+          wireSensitivityCard();
+        }
+      };
+    });
+  }
+}
+
+function buildSensitivityOptsFromState() {
+  return {
+    lookback: state.momLookback,
+    topN: state.momTopN,
+    cost: clampTradeCost(state.tradeCost),
+    weighting: state.weighting,
+    volWindow: state.volWindow,
+    maOverlay: state.maOverlay,
+    maWindow: state.maWindow,
+    cashCode: state.cashCode || "153130",
+    maCashPct: state.maCashPct,
+    regimeHedge: state.regimeHedge,
+    regimeHedgeMode: state.regimeHedgeMode,
+    regimeHedgePct: Math.min(0.15, Math.max(0, Number(state.regimeHedgePct) || 0.15)),
+    regimeHedgeCode: state.regimeHedgeCode || "114800",
+    goldOn: state.goldOn,
+    goldSleevePct: clampGoldSleeve(state.goldSleevePct),
+    goldLookback: state.goldLookback,
+    goldCode: resolveGoldCode(state.goldCode),
+    bandOn: !!state.bandOn,
+    bandPct: clampBandPct(state.bandPct),
+  };
+}
+
+function yieldToUI() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function runSensitivityAsync() {
+  const pack = state.lastRun;
+  if (!pack || !pack.result || pack.result.error) {
+    throw new Error("먼저 백테스트를 실행하세요.");
+  }
+  const token = ++state.sensitivityToken;
+  state.sensitivityRunning = true;
+  state.sensitivityResult = null;
+  const btn = $("#btnSensitivity");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "계산 중…";
+  }
+  const body = $("#sensBody");
+  if (body) {
+    body.innerHTML = `<div class="sens-progress"><div class="sens-bar" id="sensBar" style="width:2%"></div></div>
+      <p class="muted-note" id="sensProgNote">시작월별 백테스트 준비 중…</p>`;
+  }
+
+  const picks = pack.picks;
+  const weights = Object.fromEntries(picks);
+  const end = pack.result.end;
+  const rebalance = state.rebalance;
+  const initial = state.dcaOn ? state.initialCapital : 1;
+  const monthly = state.dcaOn ? state.monthlyAmount : 0;
+  const opts = buildSensitivityOptsFromState();
+  // Same price map as last run (TR if enabled)
+  const codes = picks.map(([c]) => c);
+  const needCash =
+    rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash");
+  const loadCodes = [
+    ...new Set([
+      ...codes,
+      BENCH,
+      ...(needCash ? [state.cashCode || "153130"] : []),
+      ...(state.regimeHedge
+        ? [
+            REGIME_HEDGE_B,
+            state.regimeHedgeMode === "cash"
+              ? state.cashCode || "153130"
+              : state.regimeHedgeCode || "114800",
+          ]
+        : []),
+      ...(state.goldOn ? [resolveGoldCode(state.goldCode), GOLD_CASH] : []),
+    ]),
+  ];
+  const useTr = state.totalReturn && hasRealTrData();
+  const priceMap = useTr ? buildTotalReturnPrices(state.prices, loadCodes) : state.prices;
+
+  const cfg = { ...opts, rebalance };
+  const cal = sensitivityCalendarCodes(weights, cfg);
+  const common = commonDatesForCodes(cal, priceMap, end);
+  if (common.length < SENSITIVITY_MIN_DAYS + 1) {
+    state.sensitivityRunning = false;
+    state.sensitivityResult = { error: "공통 거래일이 너무 짧습니다.", cells: [], end };
+    const card = $("#sensCard");
+    if (card) {
+      card.outerHTML = renderSensitivityCard();
+      wireSensitivityCard();
+    }
+    return;
+  }
+  const fixedEnd = common[common.length - 1];
+  const candidates = monthFirstCandidates(common, SENSITIVITY_MIN_DAYS);
+  const { selected, mode } = subsampleStarts(candidates, SENSITIVITY_MAX_STARTS);
+  const cells = [];
+  const yearsSet = new Set();
+
+  for (let i = 0; i < selected.length; i++) {
+    if (token !== state.sensitivityToken) return; // cancelled by newer run / re-backtest
+    const { ym, d0 } = selected[i];
+    const s = backtest(weights, priceMap, d0, fixedEnd, rebalance, initial, monthly, opts);
+    if (s.error) {
+      cells.push({
+        ym,
+        year: Number(ym.slice(0, 4)),
+        month: Number(ym.slice(5, 7)),
+        start: d0,
+        end: fixedEnd,
+        cagr: null,
+        mdd: null,
+        days: 0,
+        error: s.error,
+      });
+    } else {
+      cells.push({
+        ym,
+        year: Number(ym.slice(0, 4)),
+        month: Number(ym.slice(5, 7)),
+        start: s.start,
+        end: s.end,
+        cagr: s.cagr,
+        mdd: s.mdd,
+        days: s.days,
+        error: null,
+      });
+      yearsSet.add(Number(ym.slice(0, 4)));
+    }
+    if (i % SENSITIVITY_CHUNK === SENSITIVITY_CHUNK - 1 || i === selected.length - 1) {
+      const partial = {
+        error: null,
+        end: fixedEnd,
+        cells: cells.slice(),
+        mode,
+        candidateCount: candidates.length,
+        runCount: selected.length,
+        years: [...yearsSet].sort((a, b) => a - b),
+        minDays: SENSITIVITY_MIN_DAYS,
+        maxStarts: SENSITIVITY_MAX_STARTS,
+      };
+      state.sensitivityResult = partial;
+      const bar = $("#sensBar");
+      const note = $("#sensProgNote");
+      const pctDone = ((i + 1) / selected.length) * 100;
+      if (bar) bar.style.width = `${pctDone.toFixed(0)}%`;
+      if (note)
+        note.textContent = `계산 중 ${i + 1}/${selected.length} · ${modeLabelKo(mode)}`;
+      // Refresh heatmap progressively after a few chunks
+      if (i >= SENSITIVITY_CHUNK * 2 || i === selected.length - 1) {
+        const card = $("#sensCard");
+        if (card) {
+          card.outerHTML = renderSensitivityCard(partial);
+          wireSensitivityCard();
+        }
+      }
+      await yieldToUI();
+    }
+  }
+
+  if (token !== state.sensitivityToken) return;
+  state.sensitivityRunning = false;
+  state.sensitivityResult = {
+    error: null,
+    end: fixedEnd,
+    cells,
+    mode,
+    candidateCount: candidates.length,
+    runCount: selected.length,
+    years: [...yearsSet].sort((a, b) => a - b),
+    minDays: SENSITIVITY_MIN_DAYS,
+    maxStarts: SENSITIVITY_MAX_STARTS,
+  };
+  const card = $("#sensCard");
+  if (card) {
+    card.outerHTML = renderSensitivityCard();
+    wireSensitivityCard();
+  }
+}
 
 function renderMomHoldings(rows) {
   if (!rows || !rows.length) return "";
@@ -3122,11 +3616,12 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
   wireRollingChips();
+  wireSensitivityCard();
   wireExportBar();
   $("#agentText").textContent = reviewAgent(r, bench, picks);
 }
@@ -3225,7 +3720,8 @@ function reviewAgent(r, bench, picks) {
     "· 세금 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
     "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다.",
-    "· 모멘텀·역변동성·이동평균·금 슬리브 파라미터는 민감하며 과거≠미래입니다."
+    "· 모멘텀·역변동성·이동평균·금 슬리브 파라미터는 민감하며 과거≠미래입니다.",
+    "· 시작일 민감도 히트맵은 같은 설정·고정 종료일에서 시작월만 바꾼 과거 관측값입니다."
   );
   return lines.join("\n");
 }

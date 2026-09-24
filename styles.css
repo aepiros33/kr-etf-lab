@@ -401,3 +401,79 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
   color: #f0d9a8 !important;
   font-weight: 600;
 }
+
+/* Batch 6: start-date sensitivity heatmap */
+.sens-card { margin-top: 12px; }
+.sens-actions { margin: 8px 0 10px; }
+.sens-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.sens-meta {
+  font-size: 11px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.sens-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 8px;
+}
+.sens-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  min-width: 520px;
+}
+.sens-table th, .sens-table td {
+  text-align: center;
+  padding: 5px 3px;
+  border: 1px solid rgba(39,49,64,.55);
+}
+.sens-table thead th {
+  color: var(--dim);
+  font-weight: 700;
+  font-size: 10px;
+  background: rgba(20,26,34,.6);
+}
+.sens-table tbody th {
+  text-align: left;
+  padding-left: 8px;
+  color: var(--muted);
+  font-weight: 700;
+  background: rgba(20,26,34,.45);
+  white-space: nowrap;
+}
+.sens-cell span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  color: #e8eef5;
+  text-shadow: 0 1px 1px rgba(0,0,0,.35);
+}
+.sens-empty {
+  color: var(--dim);
+  background: rgba(39,49,64,.2);
+}
+.sens-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(39,49,64,.55);
+  overflow: hidden;
+  margin: 8px 0;
+}
+.sens-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #7dd3c0, #f0c27a);
+  width: 0;
+  transition: width .15s ease-out;
+}
+@media (max-width: 900px) {
+  .sens-table { font-size: 10px; min-width: 460px; }
+  .sens-cell span { font-size: 9px; }
+}

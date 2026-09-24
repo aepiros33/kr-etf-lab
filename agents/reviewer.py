@@ -6,7 +6,7 @@ import math
 import sys
 from pathlib import Path
 
-from build_backtest import backtest, load, compute_drawdown, rolling_cagr, ROLLING_WINDOWS, curve_cum_return
+from build_backtest import backtest, load, compute_drawdown, rolling_cagr, ROLLING_WINDOWS, curve_cum_return, start_date_sensitivity, SENSITIVITY_MAX_STARTS, SENSITIVITY_MIN_DAYS
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -919,6 +919,49 @@ def main():
     # Fake synthetic TR must stay gated (no inventing dividends without real series)
     if "hasRealTrData" not in app_js:
         fail("hasRealTrData gate missing — synthetic TR must not run without real data")
+
+    # Batch 6: start-date sensitivity heatmap (light invariants)
+    sens_w = {"069500": 0.6, bond_band: 0.4}
+    sens = start_date_sensitivity(
+        sens_w, prices, end="2026-09-23", rebalance="Q", max_starts=36
+    )
+    if sens.get("error"):
+        fail(f"sensitivity error: {sens['error']}")
+    if not sens.get("cells"):
+        fail("sensitivity produced no cells")
+    if sens["runCount"] > 36 or sens["runCount"] > SENSITIVITY_MAX_STARTS:
+        fail(f"sensitivity runCount over cap: {sens['runCount']}")
+    if sens["runCount"] > sens["candidateCount"]:
+        fail("sensitivity runCount > candidateCount")
+    ok_cells = [c for c in sens["cells"] if c.get("error") is None and c.get("cagr") is not None]
+    if len(ok_cells) < 4:
+        fail(f"sensitivity too few ok cells: {len(ok_cells)}")
+    for c in ok_cells:
+        if c["mdd"] is not None and c["mdd"] > 1e-12:
+            fail(f"sensitivity MDD > 0 at {c['ym']}: {c['mdd']}")
+        if c["days"] < SENSITIVITY_MIN_DAYS:
+            fail(f"sensitivity days < min at {c['ym']}: {c['days']}")
+    ok_sorted = sorted(ok_cells, key=lambda c: c["start"])
+    for a, b in zip(ok_sorted, ok_sorted[1:]):
+        # Later start (same end) must not have more trading days
+        if b["days"] > a["days"] + 1:
+            fail(f"sensitivity days not monotone {a['ym']}={a['days']} -> {b['ym']}={b['days']}")
+    # Match full-window backtest at earliest selected start
+    first = ok_sorted[0]
+    full = backtest(sens_w, prices, start=first["start"], end=sens["end"], rebalance="Q")
+    if abs(full.cagr - first["cagr"]) > 1e-12 or abs(full.mdd - first["mdd"]) > 1e-12:
+        fail("sensitivity cell must match backtest at same start/end")
+    # UI gate: button + helper + disclosure (no auto-run requirement)
+    if "민감도 보기" not in app_js:
+        fail("sensitivity button label missing in app.js")
+    if "startDateSensitivity" not in app_js:
+        fail("startDateSensitivity JS helper missing (parity)")
+    if "시작일 민감도" not in app_js:
+        fail("sensitivity section title missing")
+    if "btnSensitivity" not in app_js:
+        fail("btnSensitivity wiring missing")
+    if "과거 시뮬" not in app_js or "투자 자문 아님" not in app_js:
+        fail("sensitivity disclosure phrases missing")
 
     print("PASS")
 
