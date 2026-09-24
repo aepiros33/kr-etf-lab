@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=batch1ui1" />
+  <link rel="stylesheet" href="./styles.css?v=batch2export1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -201,8 +201,10 @@
         <div id="irpWarn" class="irp-warn" style="display:none"></div>
         <div class="btn-row">
           <button type="button" class="secondary" id="clearSelection">선택 초기화</button>
+          <button type="button" class="secondary" id="btnShareSettings">설정 링크</button>
           <button type="button" class="primary" id="run">백테스트 실행</button>
         </div>
+        <p class="muted-note">설정 링크는 주소 해시(#)에 프리셋·비중·기간·전략 플래그를 담아 같은 설정을 복원합니다. docs/SHARE_URL.md</p>
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
     </div>
@@ -216,6 +218,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=batch1ui1"></script>
+  <script src="./app.js?v=batch2export1"></script>
 </body>
 </html>

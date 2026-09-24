@@ -163,6 +163,10 @@ const state = {
   /** Structure filters (OR when any on): hedged / futures / spot */
   structFilters: { hedged: false, futures: false, spot: false },
   pricesAsOf: null,
+  /** Last successful run payload for CSV export / share. */
+  lastRun: null,
+  /** Preset key if selection still matches that preset; else null. */
+  activePreset: null,
   dcaOn: false,
   initialCapital: 10_000_000,
   monthlyAmount: 500_000,
@@ -216,6 +220,448 @@ function structureBadgeHtml(flags) {
   if (flags.spot)
     bits.push('<span class="etf-badge spot" title="현물/실물">현물</span>');
   return bits.length ? `<span class="etf-badges">${bits.join("")}</span>` : "";
+}
+
+
+
+/** First available close date for a code: price keys, else meta.start. */
+function firstAvailableDate(code) {
+  const series = state.prices[code];
+  if (series && typeof series === "object") {
+    const keys = Object.keys(series);
+    if (keys.length) return keys.reduce((a, b) => (a < b ? a : b));
+  }
+  const etf = etfByCode(code);
+  return etf && etf.start ? etf.start : null;
+}
+
+/**
+ * Compare requested period vs actual common window; list tickers that truncated
+ * (listing/price start later than requested start) or had no usable series.
+ */
+function buildWindowInfo(result, picks, requestedStart, requestedEnd) {
+  const rows = [];
+  const seen = new Set();
+  const extras = [];
+  if (state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")) {
+    extras.push(state.cashCode || "153130");
+  }
+  if (state.regimeHedge) {
+    extras.push(REGIME_HEDGE_B);
+    if (state.regimeHedgeMode === "inverse") extras.push(state.regimeHedgeCode || "114800");
+  }
+  if (state.goldOn) {
+    extras.push(resolveGoldCode(state.goldCode), GOLD_CASH);
+  }
+  const allCodes = [
+    ...picks.map(([c]) => c),
+    ...extras.filter((c) => c && !picks.some(([pc]) => pc === c)),
+  ];
+  for (const code of allCodes) {
+    if (seen.has(code)) continue;
+    seen.add(code);
+    const etf = etfByCode(code);
+    const listingStart = (etf && etf.start) || null;
+    const priceStart = firstAvailableDate(code);
+    const first = priceStart || listingStart;
+    const isPick = picks.some(([pc]) => pc === code);
+    let status = "ok";
+    if (!state.prices[code] || !Object.keys(state.prices[code] || {}).length) {
+      status = "excluded";
+    } else if (first && requestedStart && first > requestedStart) {
+      status = "truncated";
+    } else if (first && result && result.start && first === result.start && requestedStart && first > requestedStart) {
+      status = "truncated";
+    }
+    rows.push({
+      code,
+      name: (etf && etf.name) || code,
+      listingStart: listingStart || "?",
+      priceStart: priceStart || "?",
+      first: first || "?",
+      status,
+      role: isPick ? "hold" : "overlay",
+    });
+  }
+  const truncated = rows.filter((r) => r.status === "truncated");
+  const excluded = rows.filter((r) => r.status === "excluded");
+  return {
+    requestedStart: requestedStart || "",
+    requestedEnd: requestedEnd || "",
+    actualStart: result && result.start ? result.start : "",
+    actualEnd: result && result.end ? result.end : "",
+    days: result && result.days != null ? result.days : 0,
+    years: result && result.years != null ? result.years : 0,
+    rows,
+    truncated,
+    excluded,
+  };
+}
+
+function renderWindowCard(info) {
+  if (!info || !info.actualStart) return "";
+  const truncLines = info.truncated.length
+    ? info.truncated
+        .map(
+          (r) =>
+            `<li><code>${r.code}</code> ${r.name}${r.role === "overlay" ? " (전략 보조)" : ""} · 시세시작 ${r.priceStart} (상장 ${r.listingStart}) → 요청 시작(${info.requestedStart || "—"})보다 늦어 공통 기간을 자름</li>`
+        )
+        .join("")
+    : "<li>선택 종목 중 요청 시작일보다 늦게 시작하는 종목 없음</li>";
+  const exclLines = info.excluded.length
+    ? `<ul class="window-list">${info.excluded
+        .map((r) => `<li><code>${r.code}</code> ${r.name} · 시세 없음(제외)</li>`)
+        .join("")}</ul>`
+    : "";
+  const shortened =
+    info.requestedStart && info.actualStart && info.actualStart > info.requestedStart
+      ? `<div class="warn">요청 시작 ${info.requestedStart}보다 실제 시작이 ${info.actualStart}로 늦습니다. 아래 잘린 종목이 원인입니다.</div>`
+      : "";
+  return `<div class="card pad window-card" id="windowCard">
+    <div class="section-title">공통 기간 · 잘린 종목</div>
+    <div class="window-summary">실제 <strong>${info.actualStart}</strong> ~ <strong>${info.actualEnd}</strong>
+      · ${Number(info.years).toFixed(1)}년 · ${info.days}거래일
+      · 요청 ${info.requestedStart || "—"} ~ ${info.requestedEnd || "—"} (${state.period})</div>
+    ${shortened}
+    <div class="muted-note" style="margin-top:8px">상장·시세 시작이 요청 기간보다 짧은 ETF가 있으면 포트 공통창이 그 날짜로 맞춰집니다.</div>
+    <ul class="window-list">${truncLines}</ul>
+    ${exclLines}
+  </div>`;
+}
+
+function renderExportBar() {
+  return `<div class="export-bar btn-row" id="exportBar">
+    <button type="button" class="secondary" id="btnExportCsv">결과 CSV</button>
+    <button type="button" class="secondary" id="btnCopyShare">설정 링크 복사</button>
+  </div>
+  <p class="muted-note" id="shareUrlNote">공유 URL은 해시(#)에 프리셋 또는 코드·비중, 기간, 리밸런싱·오버레이 플래그를 넣습니다. 상세는 docs/SHARE_URL.md. 투자 자문 아님.</p>`;
+}
+
+/** Compact share state → location.hash (v=1). Prefer preset id when selection matches. */
+function encodeShareParams() {
+  const p = new URLSearchParams();
+  p.set("v", "1");
+  const preset = state.activePreset;
+  const matchesPreset =
+    preset &&
+    PRESETS[preset] &&
+    (() => {
+      const w = PRESETS[preset].w;
+      const sel = state.selected;
+      const keys = Object.keys(w);
+      if (keys.length !== Object.keys(sel).filter((c) => sel[c] > 0).length) return false;
+      return keys.every((c) => Math.abs((sel[c] || 0) - w[c]) < 1e-6);
+    })();
+  if (matchesPreset) {
+    p.set("preset", preset);
+  } else {
+    const parts = Object.entries(state.selected)
+      .filter(([, w]) => w > 0)
+      .map(([c, w]) => `${c}*${Number(w)}`)
+      .join("_");
+    if (parts) p.set("h", parts);
+  }
+  p.set("p", state.period || "max");
+  if (state.period === "custom") {
+    const s = $("#startDate") && $("#startDate").value;
+    const e = $("#endDate") && $("#endDate").value;
+    if (s) p.set("ps", s);
+    if (e) p.set("pe", e);
+  }
+  p.set("rb", state.rebalance || "Q");
+  if (state.rebalance === "MOM" || state.rebalance === "DMOM") {
+    p.set("lb", String(state.momLookback || 1));
+    p.set("tn", String(state.momTopN || 3));
+  }
+  if (state.weighting === "invVol") p.set("w", "invVol");
+  if (state.maOverlay) {
+    p.set("ma", "1");
+    p.set("mw", String(state.maWindow || 200));
+  }
+  if (state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")) {
+    p.set("cash", state.cashCode || "153130");
+  }
+  if (state.regimeHedge) {
+    p.set("rh", "1");
+    p.set("rhm", state.regimeHedgeMode === "cash" ? "cash" : "inverse");
+    p.set("rhp", String(Math.round(Math.min(0.15, state.regimeHedgePct || 0.15) * 100)));
+  }
+  if (state.goldOn) {
+    p.set("gold", "1");
+    p.set("gsp", String(Math.round(clampGoldSleeve(state.goldSleevePct) * 100)));
+    p.set("glb", String(state.goldLookback || 1));
+    p.set("gc", resolveGoldCode(state.goldCode));
+  }
+  if (state.dcaOn) {
+    p.set("dca", "1");
+    p.set("ic", String(state.initialCapital || 10000000));
+    p.set("mo", String(state.monthlyAmount || 0));
+  }
+  if (state.totalReturn) p.set("tr", "1");
+  if (state.accountType === "pension") {
+    p.set("acct", "pension");
+    p.set("ptr", String(state.pensionTaxRate || 0.044));
+  }
+  return p.toString();
+}
+
+function buildShareUrl() {
+  const q = encodeShareParams();
+  const base = `${location.origin}${location.pathname}${location.search}`;
+  return `${base}#${q}`;
+}
+
+async function copyShareUrl() {
+  const url = buildShareUrl();
+  try {
+    history.replaceState(null, "", `#${encodeShareParams()}`);
+  } catch (_) {
+    /* ignore */
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    const note = $("#shareUrlNote");
+    if (note) {
+      note.textContent = `링크 복사됨 (${url.length}자). 해시 키: preset|h, p, rb, w, ma, rh, gold, dca, tr 등 · docs/SHARE_URL.md`;
+    }
+  } catch (_) {
+    prompt("설정 링크를 복사하세요", url);
+  }
+}
+
+function parseShareHash() {
+  const raw = (location.hash || "").replace(/^#/, "").trim();
+  if (!raw || !raw.includes("=")) return null;
+  let params;
+  try {
+    params = new URLSearchParams(raw);
+  } catch (_) {
+    return null;
+  }
+  if (params.get("v") !== "1" && !params.get("preset") && !params.get("h")) return null;
+  return params;
+}
+
+function syncControlsFromState() {
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el != null && v != null) el.value = v;
+  };
+  const setChk = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = !!on;
+  };
+  setVal("period", state.period);
+  const custom = $("#customDates");
+  if (custom) custom.style.display = state.period === "custom" ? "flex" : "none";
+  setVal("rebalance", state.rebalance);
+  setVal("momLookback", String(state.momLookback));
+  setVal("momTopN", String(state.momTopN));
+  setVal("weighting", state.weighting);
+  setChk("maOverlay", state.maOverlay);
+  setVal("maWindow", String(state.maWindow));
+  setVal("cashCode", state.cashCode);
+  setChk("regimeHedge", state.regimeHedge);
+  setVal("regimeHedgeMode", state.regimeHedgeMode);
+  setVal("regimeHedgePct", String(Math.round(Math.min(0.15, state.regimeHedgePct || 0.15) * 100)));
+  setChk("goldOn", state.goldOn);
+  setVal("goldSleevePct", String(Math.round(clampGoldSleeve(state.goldSleevePct) * 100)));
+  setVal("goldLookback", String(state.goldLookback));
+  setVal("goldCode", resolveGoldCode(state.goldCode));
+  setChk("dcaOn", state.dcaOn);
+  const dcaIn = $("#dcaInputs");
+  if (dcaIn) dcaIn.style.display = state.dcaOn ? "flex" : "none";
+  setVal("initialCapital", String(state.initialCapital));
+  setVal("monthlyAmount", String(state.monthlyAmount));
+  setChk("trOn", state.totalReturn);
+  if (state.accountType === "pension") {
+    const p = $("#acctPension");
+    if (p) p.checked = true;
+  } else {
+    const t = $("#acctTaxable");
+    if (t) t.checked = true;
+  }
+  const ptr = $("#pensionTaxRow");
+  if (ptr) ptr.style.display = state.accountType === "pension" ? "flex" : "none";
+  setVal("pensionTaxRate", String(state.pensionTaxRate));
+}
+
+async function applyShareParams(params) {
+  const preset = params.get("preset");
+  if (preset && PRESETS[preset]) {
+    state.activePreset = preset;
+    state.selected = {};
+    const codes = Object.keys(PRESETS[preset].w);
+    await ensurePrices(codes);
+    Object.entries(PRESETS[preset].w).forEach(([code, val]) => {
+      if (state.meta.etfs.some((e) => e.code === code)) state.selected[code] = val;
+    });
+    document.querySelectorAll("#presets .chip").forEach((el) =>
+      el.classList.toggle("active", el.dataset.key === preset)
+    );
+  } else if (params.get("h")) {
+    state.activePreset = null;
+    state.selected = {};
+    document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
+    const parts = params.get("h").split("_").filter(Boolean);
+    const codes = [];
+    for (const part of parts) {
+      const [code, wStr] = part.split("*");
+      const w = Number(wStr);
+      if (code && Number.isFinite(w) && w > 0) {
+        state.selected[code] = w;
+        codes.push(code);
+      }
+    }
+    await ensurePrices(codes);
+  }
+  const period = params.get("p");
+  if (period && ["1y", "3y", "5y", "10y", "max", "custom"].includes(period)) state.period = period;
+  if (state.period === "custom") {
+    if (params.get("ps") && $("#startDate")) $("#startDate").value = params.get("ps");
+    if (params.get("pe") && $("#endDate")) $("#endDate").value = params.get("pe");
+  }
+  const rb = params.get("rb");
+  if (rb && ["Q", "Y", "M", "MOM", "DMOM", "N"].includes(rb)) state.rebalance = rb;
+  if (params.get("lb")) state.momLookback = Number(params.get("lb")) >= 3 ? 3 : 1;
+  if (params.get("tn")) state.momTopN = Math.max(1, Math.min(20, Number(params.get("tn")) || 3));
+  state.weighting = params.get("w") === "invVol" ? "invVol" : "fixed";
+  state.maOverlay = params.get("ma") === "1";
+  if (params.get("mw")) state.maWindow = Number(params.get("mw")) === 100 ? 100 : 200;
+  if (params.get("cash")) state.cashCode = params.get("cash");
+  state.regimeHedge = params.get("rh") === "1";
+  if (params.get("rhm")) state.regimeHedgeMode = params.get("rhm") === "cash" ? "cash" : "inverse";
+  if (params.get("rhp")) {
+    const v = Number(params.get("rhp"));
+    state.regimeHedgePct = Math.min(0.15, Math.max(0, Number.isFinite(v) ? v / 100 : 0.15));
+  }
+  state.goldOn = params.get("gold") === "1";
+  if (params.get("gsp")) state.goldSleevePct = clampGoldSleeve(Number(params.get("gsp")) / 100);
+  if (params.get("glb")) state.goldLookback = Number(params.get("glb")) >= 3 ? 3 : 1;
+  if (params.get("gc")) state.goldCode = resolveGoldCode(params.get("gc"));
+  state.dcaOn = params.get("dca") === "1";
+  if (params.get("ic")) state.initialCapital = Math.max(1, Number(params.get("ic")) || 1);
+  if (params.get("mo")) state.monthlyAmount = Math.max(0, Number(params.get("mo")) || 0);
+  state.totalReturn = params.get("tr") === "1";
+  if (params.get("acct") === "pension") {
+    state.accountType = "pension";
+    if (params.get("ptr")) state.pensionTaxRate = Number(params.get("ptr")) || 0.044;
+  } else {
+    state.accountType = "taxable";
+  }
+  syncControlsFromState();
+  renderList();
+  updateSum();
+  updateIrpWarn();
+}
+
+function csvEscape(v) {
+  const s = v == null ? "" : String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 0);
+}
+
+function exportRunCsv() {
+  const pack = state.lastRun;
+  if (!pack || !pack.result || pack.result.error) {
+    alert("먼저 백테스트를 실행하세요.");
+    return;
+  }
+  const { result: r, picks, bench, windowInfo } = pack;
+  const lines = [];
+  lines.push("section,key,value");
+  lines.push(["meta", "generated", new Date().toISOString().slice(0, 19)].map(csvEscape).join(","));
+  lines.push(["meta", "pricesAsOf", state.pricesAsOf || ""].map(csvEscape).join(","));
+  lines.push(["meta", "note", "시뮬레이터 결과 내보내기 · 투자 자문 아님"].map(csvEscape).join(","));
+  lines.push("");
+  lines.push("section,code,name,weight_pct");
+  for (const [code, w] of picks) {
+    const etf = etfByCode(code);
+    lines.push(["holdings", code, (etf && etf.name) || "", w].map(csvEscape).join(","));
+  }
+  lines.push("");
+  lines.push("section,param,value");
+  const params = [
+    ["period", state.period],
+    ["rebalance", state.rebalance],
+    ["weighting", state.weighting],
+    ["momLookback", state.momLookback],
+    ["momTopN", state.momTopN],
+    ["maOverlay", state.maOverlay],
+    ["maWindow", state.maWindow],
+    ["cashCode", state.cashCode],
+    ["regimeHedge", state.regimeHedge],
+    ["regimeHedgeMode", state.regimeHedgeMode],
+    ["regimeHedgePct", state.regimeHedgePct],
+    ["goldOn", state.goldOn],
+    ["goldSleevePct", clampGoldSleeve(state.goldSleevePct)],
+    ["goldLookback", state.goldLookback],
+    ["goldCode", resolveGoldCode(state.goldCode)],
+    ["dcaOn", state.dcaOn],
+    ["initialCapital", state.initialCapital],
+    ["monthlyAmount", state.monthlyAmount],
+    ["totalReturn", state.totalReturn],
+    ["accountType", state.accountType],
+    ["activePreset", state.activePreset || ""],
+    ["commonStart", r.start],
+    ["commonEnd", r.end],
+    ["years", r.years],
+    ["days", r.days],
+  ];
+  for (const [k, v] of params) {
+    lines.push(["params", k, v].map(csvEscape).join(","));
+  }
+  lines.push("");
+  lines.push("section,metric,value");
+  const kpis = [
+    ["cagr", r.cagr],
+    ["totalRet", r.totalRet],
+    ["mdd", r.mdd],
+    ["vol", r.vol],
+    ["sharpe", r.sharpe],
+    ["totalInvested", r.totalInvested],
+    ["finalValue", r.finalValue],
+  ];
+  for (const [k, v] of kpis) {
+    lines.push(["kpi", k, v].map(csvEscape).join(","));
+  }
+  if (r.yearly && Object.keys(r.yearly).length) {
+    lines.push("");
+    lines.push("section,year,portfolio,benchmark");
+    for (const y of Object.keys(r.yearly).sort()) {
+      const b = bench && bench.yearly ? bench.yearly[y] : "";
+      lines.push(["yearly", y, r.yearly[y], b === undefined ? "" : b].map(csvEscape).join(","));
+    }
+  }
+  if (windowInfo && windowInfo.rows && windowInfo.rows.length) {
+    lines.push("");
+    lines.push("section,code,listingStart,priceStart,status");
+    for (const row of windowInfo.rows) {
+      lines.push(["window", row.code, row.listingStart, row.priceStart, row.status].map(csvEscape).join(","));
+    }
+  }
+  const stamp = (r.end || "run").replace(/-/g, "");
+  downloadText(`kr-etf-lab_${stamp}.csv`, "\uFEFF" + lines.join("\n"));
+}
+
+function wireExportBar() {
+  const csvBtn = $("#btnExportCsv");
+  if (csvBtn) csvBtn.onclick = () => exportRunCsv();
+  const shareBtn = $("#btnCopyShare");
+  if (shareBtn) shareBtn.onclick = () => copyShareUrl();
 }
 
 
@@ -380,7 +826,30 @@ async function boot() {
   renderCatFilters();
   renderStructFilters();
   renderList();
-  await applyPreset("kAllWeather");
+  const shared = parseShareHash();
+  if (shared && (shared.get("preset") || shared.get("h"))) {
+    await applyShareParams(shared);
+    // syncStratControls is wired on DOMContentLoaded; call after controls exist
+    const maRow = $("#maOverlayRow");
+    if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
+    const rhRow = $("#regimeHedgeRow");
+    if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
+    const gRow = $("#goldOnRow");
+    if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
+    const momRow = $("#momControls");
+    if (momRow)
+      momRow.style.display =
+        state.rebalance === "MOM" || state.rebalance === "DMOM" ? "flex" : "none";
+    const cashRow = $("#dmomCashRow");
+    if (cashRow)
+      cashRow.style.display =
+        state.rebalance === "DMOM" || state.maOverlay || (state.regimeHedge && state.regimeHedgeMode === "cash")
+          ? "flex"
+          : "none";
+    await run();
+  } else {
+    await applyPreset("kAllWeather");
+  }
 }
 
 function renderPresets() {
@@ -447,6 +916,7 @@ async function applyPreset(key) {
   document.querySelectorAll("#presets .chip").forEach((el) =>
     el.classList.toggle("active", el.dataset.key === key)
   );
+  state.activePreset = key;
   state.selected = {};
   const codes = Object.keys(PRESETS[key].w);
   await ensurePrices(codes);
@@ -460,6 +930,8 @@ async function applyPreset(key) {
 
 function clearSelection() {
   state.selected = {};
+  state.activePreset = null;
+  state.lastRun = null;
   document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
   // Force DOM checkboxes off even before re-render (visible feedback).
   document.querySelectorAll("#etfList input[type=checkbox]").forEach((el) => {
@@ -540,6 +1012,7 @@ function renderList() {
         await ensurePrices([etf.code]);
         state.selected[etf.code] = 10;
       } else delete state.selected[etf.code];
+      state.activePreset = null;
       renderList();
     };
     const range = el.querySelector("input[type=range]");
@@ -555,6 +1028,7 @@ function renderList() {
           state.selected[etf.code] = w;
           el.querySelector(".wnum").textContent = w + "%";
         }
+        state.activePreset = null;
         updateSum();
         updateIrpWarn();
       };
@@ -937,7 +1411,11 @@ async function run() {
       annualYieldTax: tax.annualYieldTax * scale,
     };
   }
-  renderResult(result, bench, picks, corr, taxView);
+  const windowInfo = result.error ? null : buildWindowInfo(result, picks, start, end);
+  state.lastRun = result.error
+    ? null
+    : { result, picks, bench, corr, tax: taxView, windowInfo, requestedStart: start, requestedEnd: end };
+  renderResult(result, bench, picks, corr, taxView, windowInfo);
 }
 
 /**
@@ -1914,7 +2392,7 @@ function renderMomHoldings(rows) {
   </div>`;
 }
 
-function renderResult(r, bench, picks, corr, tax) {
+function renderResult(r, bench, picks, corr, tax, windowInfo) {
   const host = $("#result");
   if (r.error) {
     destroyExtraCharts();
@@ -1964,11 +2442,14 @@ function renderResult(r, bench, picks, corr, tax) {
     state.weighting === "invVol"
       ? `<div class="warn">비중 방식: 역변동성(최근 ${state.volWindow}거래일, 리밸런싱 전일까지) · 모멘텀/듀얼도 편입 집합에 동일 적용</div>`
       : "";
-  host.innerHTML = `<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div><div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
+  const exportBar = renderExportBar();
+  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
   wireRollingChips();
+  wireExportBar();
   $("#agentText").textContent = reviewAgent(r, bench, picks);
 }
 
@@ -2217,6 +2698,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
   $("#run").onclick = () => run();
+  const shareSettingsBtn = document.getElementById("btnShareSettings");
+  if (shareSettingsBtn) shareSettingsBtn.onclick = () => copyShareUrl();
   boot().catch((err) => {
     $("#result").innerHTML = `<div class="card pad empty">${err.message || err}</div>`;
   });

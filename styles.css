@@ -282,3 +282,11 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
   background: rgba(125,211,192,.1);
   border: 1px solid rgba(125,211,192,.35);
 }
+
+/* Batch 2: export + common window */
+.export-bar { margin-bottom: 12px; }
+.export-bar .secondary { flex: 1 1 auto; min-width: 0; }
+.window-card { margin-bottom: 12px; }
+.window-summary { font-size: 13px; line-height: 1.55; color: var(--text); }
+.window-list { margin: 8px 0 0; padding-left: 1.2em; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.window-list code { color: var(--accent); font-size: 11px; }
