@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=batch6heat1" />
+  <link rel="stylesheet" href="./styles.css?v=selpanel1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -258,6 +258,14 @@
 
         <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
         <div class="etf-list" id="etfList"></div>
+        <div class="sel-glance" id="selGlance" aria-live="polite">
+          <div class="sel-glance-head">
+            <div class="sel-glance-title" id="selGlanceTitle">선택 0종 · 합 0%</div>
+          </div>
+          <div class="sel-glance-empty" id="selGlanceEmpty">선택한 ETF가 없습니다.</div>
+          <div class="sel-glance-bar" id="selGlanceBar" hidden></div>
+          <div class="sel-glance-list" id="selGlanceList" hidden></div>
+        </div>
         <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화 · 시세는 선택 종목만 로드</span></div>
         <div id="irpWarn" class="irp-warn" style="display:none"></div>
         <div class="btn-row">
@@ -281,6 +289,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=batch6heat1"></script>
+  <script src="./app.js?v=selpanel1"></script>
 </body>
 </html>

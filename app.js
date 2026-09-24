@@ -1071,6 +1071,7 @@ function renderList() {
     const on = etf.code in state.selected;
     const el = document.createElement("div");
     el.className = "etf" + (on ? " on" : "") + (etf.leveraged ? " lev" : "");
+    el.setAttribute("data-etf", etf.code);
     const levTag = etf.leveraged ? " · 레버리지/인버스" : "";
     const flags = etfStructureFlags(etf);
     const badgeHtml = structureBadgeHtml(flags);
@@ -1106,10 +1107,165 @@ function renderList() {
   updateIrpWarn();
 }
 
+
+/** Short display name for glance chips (truncate long ETF names). */
+function shortEtfName(etf) {
+  if (!etf || !etf.name) return "";
+  const n = etf.name;
+  return n.length > 18 ? n.slice(0, 17) + "…" : n;
+}
+
+function glanceColor(code) {
+  let h = 0;
+  for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) >>> 0;
+  const hue = h % 360;
+  return `hsl(${hue} 55% 55%)`;
+}
+
+function etfByCode(code) {
+  return (state.meta && state.meta.etfs ? state.meta.etfs : []).find((e) => e.code === code) || null;
+}
+
+function renderSelGlance() {
+  const title = $("#selGlanceTitle");
+  const empty = $("#selGlanceEmpty");
+  const bar = $("#selGlanceBar");
+  const list = $("#selGlanceList");
+  if (!title || !empty || !bar || !list) return;
+  const picks = Object.entries(state.selected)
+    .filter(([, w]) => w > 0)
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  const sum = picks.reduce((a, [, w]) => a + w, 0);
+  const sumLabel = Number.isInteger(sum) ? String(sum) : sum.toFixed(1);
+  title.textContent = `선택 ${picks.length}종 · 합 ${sumLabel}%`;
+  if (!picks.length) {
+    empty.hidden = false;
+    empty.style.display = "";
+    bar.hidden = true;
+    list.hidden = true;
+    list.innerHTML = "";
+    bar.innerHTML = "";
+    return;
+  }
+  empty.hidden = true;
+  empty.style.display = "none";
+  bar.hidden = false;
+  list.hidden = false;
+  const denom = sum > 0 ? sum : 1;
+  bar.innerHTML = picks
+    .map(([code, w]) => {
+      const pct = (w / denom) * 100;
+      return `<span style="width:${pct}%;background:${glanceColor(code)}" title="${code} ${w}%"></span>`;
+    })
+    .join("");
+  list.innerHTML = picks
+    .map(([code, w]) => {
+      const etf = etfByCode(code);
+      const name = shortEtfName(etf) || code;
+      const flags = etf ? etfStructureFlags(etf) : { hedged: false, futures: false, spot: false };
+      const badge = structureBadgeHtml(flags);
+      const cat = etf && etf.category ? `<span class="cat">${etf.category}</span>` : "";
+      const wLabel = Number.isInteger(w) ? `${w}%` : `${Number(w).toFixed(1)}%`;
+      return `<div class="sel-glance-row" data-glance="${code}" title="${etf ? etf.name : code}">
+        <span class="sel-glance-swatch" style="background:${glanceColor(code)}"></span>
+        <div class="sel-glance-meta">
+          <div class="sel-glance-name">${name}${badge}</div>
+          <div class="sel-glance-sub"><code>${code}</code>${cat}</div>
+        </div>
+        <div class="sel-glance-w">${wLabel}</div>
+        <div class="sel-glance-acts">
+          <button type="button" data-adj="${code}" data-delta="-5" title="비중 −5">−</button>
+          <button type="button" data-adj="${code}" data-delta="5" title="비중 +5">+</button>
+          <button type="button" class="rm" data-rm="${code}" title="선택 해제">×</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+  list.querySelectorAll(".sel-glance-row").forEach((row) => {
+    row.onclick = (e) => {
+      if (e.target.closest("button")) return;
+      focusEtfInList(row.getAttribute("data-glance"));
+    };
+  });
+  list.querySelectorAll("button[data-rm]").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      removeGlanceCode(btn.getAttribute("data-rm"));
+    };
+  });
+  list.querySelectorAll("button[data-adj]").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      adjustGlanceWeight(btn.getAttribute("data-adj"), Number(btn.getAttribute("data-delta")));
+    };
+  });
+}
+
+async function focusEtfInList(code) {
+  if (!code) return;
+  // Clear filters if the row is hidden by search/category/struct
+  const visible = document.querySelector(`#etfList .etf[data-etf="${code}"]`);
+  if (!visible) {
+    state.search = "";
+    state.category = "전체";
+    state.structFilters = { hedged: false, futures: false, spot: false };
+    const search = $("#etfSearch");
+    if (search) search.value = "";
+    renderCatFilters();
+    renderStructFilters();
+    renderList();
+  }
+  const el = document.querySelector(`#etfList .etf[data-etf="${code}"]`);
+  if (!el) return;
+  const box = $("#etfList");
+  if (box) {
+    const top = el.offsetTop - box.offsetTop;
+    box.scrollTo({ top: Math.max(0, top - 8), behavior: "smooth" });
+  }
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 900);
+}
+
+function removeGlanceCode(code) {
+  if (!(code in state.selected)) return;
+  delete state.selected[code];
+  state.activePreset = null;
+  renderList();
+}
+
+function adjustGlanceWeight(code, delta) {
+  if (!(code in state.selected) && !(delta > 0)) return;
+  const cur = state.selected[code] || 0;
+  const next = Math.max(0, Math.min(100, cur + delta));
+  state.activePreset = null;
+  if (next <= 0) delete state.selected[code];
+  else state.selected[code] = next;
+  renderList();
+}
+
+function portLineHtml(picks) {
+  if (!picks || !picks.length) return "";
+  const total = picks.reduce((s, [, w]) => s + Number(w), 0) || 1;
+  const chips = picks
+    .map(([c, w]) => {
+      const nw = (Number(w) / total) * 100;
+      const label = Number.isInteger(Math.round(nw * 10) / 10) && Math.abs(nw - Math.round(nw)) < 1e-6
+        ? `${Math.round(nw)}%`
+        : `${nw.toFixed(1)}%`;
+      return `<span class="port-chip"><code>${c}</code><span class="pc-w">${label}</span></span>`;
+    })
+    .join("");
+  return `<div class="port-line"><span class="port-label">이번 포트</span><span class="port-chips">${chips}</span></div>`;
+}
+
 function updateSum() {
   const sum = Object.values(state.selected).reduce((a, b) => a + b, 0);
-  $("#sum").textContent = `비중 합 ${sum}%`;
-  $("#sum").style.color = Math.abs(sum - 100) < 1e-6 ? "var(--accent)" : "var(--accent2)";
+  const sumEl = $("#sum");
+  if (sumEl) {
+    sumEl.textContent = `비중 합 ${sum}%`;
+    sumEl.style.color = Math.abs(sum - 100) < 1e-6 ? "var(--accent)" : "var(--accent2)";
+  }
+  renderSelGlance();
 }
 
 /** Selective price loader: selected tickers + benchmark only.
@@ -3616,7 +3772,7 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}${portLineHtml(picks)}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);

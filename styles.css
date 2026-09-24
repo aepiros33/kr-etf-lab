@@ -107,6 +107,106 @@ input[type="search"] { width: 100%; }
 input[type="range"] { flex: 1; accent-color: var(--accent); }
 .wnum { width: 54px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--accent); }
 .sumline { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin: 8px 0 12px; flex-wrap: wrap; }
+
+/* 선택 한눈 보기 */
+.sel-glance {
+  margin: 10px 0 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #121922;
+  position: sticky;
+  bottom: 8px;
+  z-index: 3;
+}
+.sel-glance-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.sel-glance-title {
+  font-size: 13px; font-weight: 800; color: var(--accent);
+  font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+}
+.sel-glance-empty { font-size: 12px; color: var(--dim); padding: 2px 0 4px; }
+.sel-glance-bar {
+  display: flex; height: 8px; border-radius: 999px; overflow: hidden;
+  background: #0f151c; border: 1px solid var(--line); margin-bottom: 10px;
+}
+.sel-glance-bar span { display: block; height: 100%; min-width: 2px; }
+.sel-glance-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 220px; overflow: auto; padding-right: 2px;
+}
+.sel-glance-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 10px;
+  border: 1px solid transparent; background: #0f151c;
+  cursor: pointer;
+}
+.sel-glance-row:hover { border-color: rgba(125,211,192,.35); }
+.sel-glance-swatch {
+  width: 8px; height: 8px; border-radius: 2px; flex: 0 0 auto;
+}
+.sel-glance-meta { flex: 1 1 auto; min-width: 0; }
+.sel-glance-name {
+  font-size: 12px; font-weight: 700; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.sel-glance-sub {
+  font-size: 10px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+  margin-top: 1px;
+}
+.sel-glance-w {
+  font-size: 12px; font-weight: 800; color: var(--accent);
+  font-variant-numeric: tabular-nums; min-width: 42px; text-align: right;
+}
+.sel-glance-acts { display: flex; gap: 2px; flex: 0 0 auto; }
+.sel-glance-acts button {
+  border: 1px solid var(--line); background: var(--chip); color: var(--text);
+  border-radius: 8px; width: 26px; height: 26px; padding: 0;
+  font-size: 13px; font-weight: 800; cursor: pointer; line-height: 1;
+}
+.sel-glance-acts button:hover { border-color: rgba(125,211,192,.45); color: #fff; }
+.sel-glance-acts button.rm:hover { border-color: rgba(255,107,122,.5); color: var(--down); }
+.etf.flash {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  transition: outline-color .8s ease;
+}
+
+/* 결과: 이번 포트 */
+.port-line {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #121922;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.port-line .port-label {
+  color: var(--muted); font-weight: 700; margin-right: 6px;
+}
+.port-line .port-chips {
+  display: inline-flex; flex-wrap: wrap; gap: 6px; vertical-align: middle;
+}
+.port-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 8px; border-radius: 999px;
+  background: rgba(125,211,192,.08);
+  border: 1px solid rgba(125,211,192,.28);
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: 11px;
+}
+.port-chip .pc-w { color: var(--accent); }
+@media (max-width: 900px) {
+  .sel-glance { position: static; }
+  .sel-glance-list {
+    flex-direction: row; flex-wrap: nowrap; overflow-x: auto;
+    max-height: none; gap: 8px; padding-bottom: 4px;
+  }
+  .sel-glance-row {
+    flex: 0 0 auto; min-width: 168px; max-width: 220px;
+  }
+}
+
 .btn-row {
   display: flex; gap: 8px; margin-top: 4px; align-items: stretch;
 }
