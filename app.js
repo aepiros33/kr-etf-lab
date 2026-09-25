@@ -748,6 +748,8 @@ function exportRunCsv() {
     ["totalInvested", r.totalInvested],
     ["finalValue", r.finalValue],
     ["rebalCount", r.rebalCount != null ? r.rebalCount : ""],
+    ["sleeveUpdateCount", r.sleeveUpdateCount != null ? r.sleeveUpdateCount : ""],
+    ["dcaBuyCount", r.dcaBuyCount != null ? r.dcaBuyCount : ""],
     ["bandApplied", !!r.bandApplied],
     ["tradeCost", r.tradeCost != null ? r.tradeCost : ""],
     ["totalCostDrag", r.totalCostDrag != null ? r.totalCostDrag : ""],
@@ -2251,8 +2253,14 @@ function updateTradeCostLabel() {
 
 /**
  * Same-day: mark-to-market THEN rebalance.
- * DCA: on first trading day of each new month, add cash then buy to target weights.
- * Trading cost: on each rebalance, value -= value × TO × rate (TO = one-way turnover).
+ * Full rebalance ONLY on real rebalance dates (calendar Q/Y/M or band breach,
+ * MOM-like monthly swaps, day 0).
+ * DCA: on first trading day of each new month, add cash then BUY at current target
+ * weights (no selling); on a calendar date the cash joins the full rebalance.
+ * Monthly overlays (regime hedge / sleeveTrend / volTarget / GOLDON) on non-calendar
+ * months: sleeve-only update — overlays re-applied to the drifted core (virtual core
+ * book since last full rebalance), core keeps its relative drift.
+ * Trading cost: value -= value × TO × rate (TO = one-way turnover of actual trades).
  * weighting invVol / maOverlay applied on rebalance days (and day 0).
  * Numbers are computed only here (and in agents/build_backtest.py).
  */
@@ -2426,7 +2434,15 @@ function backtest(
   const curve = [],
     rets = [];
 
-  function targetWeights(d) {
+  // Monthly overlays (updated every new month; sleeve-only on non-calendar months)
+  const monthlyOverlay = regimeHedge || goldOn || volTargetOn || sleeveTrendOn;
+  let coreTarget = { ...tw }; // core base (post invVol/MA) at last full rebalance
+  let coreUnits = {}; // virtual core book (drifts with prices)
+  let sleeveUpdateCount = 0;
+  let dcaBuyCount = 0;
+
+  function coreBase(d) {
+    // Rebalance-date base: mode picks → invVol → MA overlay (calendar decisions)
     let base;
     if (rebalance === "MOM") {
       [, base] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
@@ -2456,10 +2472,18 @@ function backtest(
       regimeLog.push({ date: d, regime: lastRegime });
       base = applyMaOverlay(base, riskOn, cashCode, maCashPct);
     }
+    return Object.fromEntries(Object.entries(base).filter(([, w]) => w > 0));
+  }
+
+  function applyMonthlyOverlays(baseIn, d, log = true) {
+    // regime hedge → sleeveTrend → volTarget → GOLDON (last)
+    let base = { ...baseIn };
     if (regimeHedge && hedgeCodeRes) {
       const hedgeOn = regimeHedgeSignal(priceMap, d, maWindow);
-      lastHedge = hedgeOn;
-      hedgeLog.push({ date: d, hedge: hedgeOn });
+      if (log) {
+        lastHedge = hedgeOn;
+        hedgeLog.push({ date: d, hedge: hedgeOn });
+      }
       base = applyRegimeHedge(base, hedgeOn, hedgeCodeRes, regimeHedgePct);
     }
     if (sleeveTrendOn) {
@@ -2492,25 +2516,69 @@ function backtest(
     if (goldOn) {
       goldState = goldSignalOn(d.slice(0, 7), goldLb, monthEndsCache, goldHold);
       base = applyGoldSleeve(base, goldState, goldSleeve, goldHold);
-      lastGoldOn = goldState;
-      lastGoldHolding = goldState ? goldHold : GOLD_CASH;
-      goldLog.push({
-        date: d,
-        month: d.slice(0, 7),
-        on: goldState,
-        holding: lastGoldHolding,
-        weights: { ...base },
-      });
+      if (log) {
+        lastGoldOn = goldState;
+        lastGoldHolding = goldState ? goldHold : GOLD_CASH;
+        goldLog.push({
+          date: d,
+          month: d.slice(0, 7),
+          on: goldState,
+          holding: lastGoldHolding,
+          weights: { ...base },
+        });
+      }
     }
     const active = Object.keys(base).filter((c) => base[c] > 0);
     return [base, active, goldState];
   }
 
+  function targetWeights(d) {
+    const core = coreBase(d);
+    const [full, active, goldState] = applyMonthlyOverlays(core, d, true);
+    return [core, full, active, goldState];
+  }
+
+  function resetCoreBook(d, v) {
+    coreUnits = {};
+    for (const [c, w] of Object.entries(coreTarget)) {
+      if (w > 0) coreUnits[c] = (w * v) / priceMap[c][d];
+    }
+  }
+
+  function coreValue(d) {
+    let cv = 0;
+    for (const [c, u] of Object.entries(coreUnits)) cv += u * priceMap[c][d];
+    return cv;
+  }
+
+  function coreDriftWeights(d) {
+    const cv = coreValue(d);
+    if (!(cv > 0)) return { ...coreTarget };
+    const out = {};
+    for (const [c, u] of Object.entries(coreUnits)) {
+      if (u > 0) out[c] = (u * priceMap[c][d]) / cv;
+    }
+    return out;
+  }
+
+  function coreAddCash(d, valuePre, contrib) {
+    // Virtual core: rescale to pre-cash portfolio value, then buy cash at core target
+    const cv = coreValue(d);
+    if (cv > 0 && valuePre > 0) {
+      const k = valuePre / cv;
+      for (const c of Object.keys(coreUnits)) coreUnits[c] *= k;
+    }
+    for (const [c, w] of Object.entries(coreTarget)) {
+      if (w > 0) coreUnits[c] = (coreUnits[c] || 0) + (contrib * w) / priceMap[c][d];
+    }
+  }
+
   for (const d of common) {
     if (!units) {
       let gState;
-      [currentTw, activeCodes, gState] = targetWeights(d);
+      [coreTarget, currentTw, activeCodes, gState] = targetWeights(d);
       units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
+      resetCoreBook(d, value);
       prevHoldings = new Set(activeCodes);
       if (goldOn) prevGoldState = gState;
       if (momLike) {
@@ -2522,26 +2590,75 @@ function backtest(
       value = activeCodes.reduce((s, c) => s + units[c] * priceMap[c][d], 0);
       if (prevValue != null && prevValue > 0) rets.push([d, value / prevValue - 1]);
 
-      // 2) DCA cash then 3) rebalance
-      // Band mode: ignore Q/Y/M calendar; daily drift vs last targets.
-      // MOM/DMOM: bandActive is false → keep monthly calendar.
-      let doRebal = bandActive ? false : isRebal(prev, d);
-      if (regimeHedge && isNewMonth(prev, d)) doRebal = true;
-      if (goldOn && isNewMonth(prev, d)) doRebal = true;
-      if ((volTargetOn || sleeveTrendOn) && isNewMonth(prev, d)) doRebal = true;
-      if (monthlyContribution > 0 && isNewMonth(prev, d)) {
-        value += monthlyContribution;
-        totalInvested += monthlyContribution;
+      const newMonth = isNewMonth(prev, d);
+      // Full rebalance ONLY on real rebalance dates (calendar Q/Y/M, MOM-like monthly,
+      // or band breach below). Band mode ignores the calendar.
+      let doFull = bandActive ? false : isRebal(prev, d);
+
+      // 2) Monthly DCA cash inflow on first trading day of new month
+      let contrib = 0;
+      const valuePre = value;
+      if (monthlyContribution > 0 && newMonth) {
+        contrib = Number(monthlyContribution);
+        value += contrib;
+        totalInvested += contrib;
         contributions += 1;
-        doRebal = true;
       }
-      if (bandActive && bandDriftExceeds(units, priceMap, d, value, currentTw, bandPctC)) {
-        doRebal = true;
+
+      // 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
+      // Core holdings keep their relative drift (no reset to target weights).
+      const overlayMonth = monthlyOverlay && newMonth;
+      if (!doFull && (contrib > 0 || overlayMonth)) {
+        const wOld = currentWeights(units, priceMap, d, value);
+        if (contrib > 0) coreAddCash(d, valuePre, contrib);
+        let newUnits;
+        if (overlayMonth) {
+          const drifted = coreDriftWeights(d);
+          const [sleeveTw, sleeveActive, gState] = applyMonthlyOverlays(drifted, d, true);
+          // Full-target weights at current overlay state: DCA buys + band ref
+          currentTw = applyMonthlyOverlays(coreTarget, d, false)[0];
+          newUnits = {};
+          for (const c of sleeveActive) newUnits[c] = (sleeveTw[c] * valuePre) / priceMap[c][d];
+          sleeveUpdateCount += 1;
+          if (goldOn) prevGoldState = gState;
+        } else {
+          newUnits = { ...units };
+        }
+        if (contrib > 0) {
+          dcaBuyCount += 1;
+          for (const [c, w] of Object.entries(currentTw)) {
+            if (w > 0) newUnits[c] = (newUnits[c] || 0) + (contrib * w) / priceMap[c][d];
+          }
+        }
+        // Unified cost on actual trades: TO = 0.5 × Σ|wNew − wOld|
+        // (a pure cash buy costs 0.5 × contrib × rate, same as before).
+        if (momCost > 0) {
+          const wNew = currentWeights(newUnits, priceMap, d, value);
+          const turnover = oneWayTurnover(wOld, wNew);
+          if (turnover > 0) {
+            const drag = value * turnover * momCost;
+            totalCostDrag += drag;
+            const k = 1 - turnover * momCost;
+            for (const c of Object.keys(newUnits)) newUnits[c] *= k;
+          }
+        }
+        units = Object.fromEntries(Object.entries(newUnits).filter(([, u]) => u > 0));
+        activeCodes = Object.keys(units);
+        prevHoldings = new Set(activeCodes);
+        value = activeCodes.reduce((s, c) => s + units[c] * priceMap[c][d], 0);
       }
-      if (doRebal) {
+
+      // Band drift (after MTM / DCA / sleeve update): any |w-target| > band
+      if (bandActive && !doFull && bandDriftExceeds(units, priceMap, d, value, currentTw, bandPctC)) {
+        doFull = true;
+      }
+
+      // 3b) Full rebalance after MTM (+ optional cash)
+      if (doFull) {
         rebalCount += 1;
         const wOld = currentWeights(units, priceMap, d, value);
-        const [newTw, newActive, gState] = targetWeights(d);
+        const [newCore, newTw, newActive, gState] = targetWeights(d);
+        coreTarget = newCore;
         const newSet = new Set(newActive);
         // Unified turnover cost (calendar / band / MOM / gold via weight Δ):
         // drag = value × oneWayTurnover × costRate
@@ -2557,6 +2674,7 @@ function backtest(
         currentTw = newTw;
         activeCodes = newActive;
         units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
+        resetCoreBook(d, value);
         prevHoldings = newSet;
         if (momLike) {
           momHoldings.push({ month: d.slice(0, 7), codes: [...activeCodes], weights: { ...currentTw } });
@@ -2646,6 +2764,8 @@ function backtest(
     goldHolding: goldOn ? lastGoldHolding : null,
     goldLog: goldOn ? goldLog : null,
     rebalCount,
+    sleeveUpdateCount,
+    dcaBuyCount,
     bandApplied: bandActive,
     bandPct: bandActive ? bandPctC : null,
     tradeCost: momCost,
@@ -4136,8 +4256,8 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
   const bandNote = r.bandApplied
 
     ? `<div class="warn">리밸런싱 밴드 · ±${(Number(r.bandPct) * 100).toFixed(0)}% · 리밸런싱 ${r.rebalCount != null ? r.rebalCount : "—"}회 · Q/Y/M 캘린더 무시·매일 드리프트 검사 · MOM/DMOM에는 미적용 · 과거 시뮬</div>`
-    : r.rebalCount != null && state.rebalance !== "N"
-      ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})</div>`
+    : r.rebalCount != null && (state.rebalance !== "N" || r.sleeveUpdateCount || r.dcaBuyCount)
+      ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})${r.sleeveUpdateCount ? ` · 오버레이 슬리브 갱신 ${r.sleeveUpdateCount}회` : ""}${r.dcaBuyCount ? ` · 적립 추가매수 ${r.dcaBuyCount}회` : ""}</div>`
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
@@ -4322,7 +4442,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (state.bandOn) {
         bandHint.textContent = mom
           ? "밴드 ON이어도 모멘텀류(MOM/MOM12_1/XSMOM/DMOM)는 월간 교체 로직을 유지합니다(밴드 미적용)."
-          : "밴드 ON이면 Q/Y/M 캘린더를 쓰지 않고 매일 목표 대비 드리프트를 봅니다. |현재−목표| > 밴드(%)인 종목이 있으면 목표 비중으로 맞춥니다. DCA·국면헤지·금 슬리브 월초 강제 리밸런싱은 유지됩니다.";
+          : "밴드 ON이면 Q/Y/M 캘린더를 쓰지 않고 매일 목표 대비 드리프트를 봅니다. |현재−목표| > 밴드(%)인 종목이 있으면 목표 비중으로 맞춥니다. 월 적립은 목표 비중 추가 매수만, 국면헤지·금 슬리브·변동성 타깃·슬리브 추세는 월초 슬리브만 갱신합니다(전체 재조정 아님).";
       }
     }
     syncMomControls();

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=strat4v1" />
+  <link rel="stylesheet" href="./styles.css?v=rebalfix1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -43,6 +43,7 @@
             <option value="N">리밸런싱 없음</option>
           </select>
         </div>
+        <p class="muted-note" id="rebalRuleNote">분기·연 1회·매월은 해당 날짜에만 전체 보유를 목표 비중으로 재조정했습니다. 월 적립은 목표 비중으로 추가 매수만, 금/국면헤지/변동성 타깃/슬리브 추세의 월간 갱신은 오버레이 슬리브만 조정(기존 보유 간 비율 유지) · 과거 시뮬.</p>
         <div class="row mom-row" id="momControls" style="display:none">
           <label class="field">모멘텀 룩백
             <select id="momLookback">
@@ -78,7 +79,7 @@
             <input type="number" id="volTargetWindow" min="20" max="120" step="1" value="60" />
           </label>
         </div>
-        <p class="muted-note" id="volTargetHint" style="display:none">위험 슬리브 실현변동성(연율)이 목표에 가깝도록 비중을 줄이고 잔여를 안전자산(기본 153130)에 둡니다. 스케일 ≤100% · 레버리지/인버스 ETF는 이 경로에서 제외 · asof 이전 종가만 · 과거 시뮬.</p>
+        <p class="muted-note" id="volTargetHint" style="display:none">위험 슬리브 실현변동성(연율)이 목표에 가깝도록 비중을 줄이고 잔여를 안전자산(기본 153130)에 둡니다. 스케일 ≤100% · 월초엔 위험/안전 비율만 조정(위험자산 간 비율 유지) · 레버리지/인버스 ETF는 이 경로에서 제외 · asof 이전 종가만 · 과거 시뮬.</p>
 
         <label class="toggle">
           <input type="checkbox" id="sleeveTrend" />
@@ -98,7 +99,7 @@
             </select>
           </label>
         </div>
-        <p class="muted-note" id="sleeveTrendHint" style="display:none">카테고리(국내주식·해외주식·채권·원자재·테마 등)별로 ON/OFF. OFF 비중은 안전자산으로. 신호 결측은 OFF. 현금성은 유지. 전월 말·asof 이전만 · 과거 시뮬.</p>
+        <p class="muted-note" id="sleeveTrendHint" style="display:none">카테고리(국내주식·해외주식·채권·원자재·테마 등)별로 ON/OFF. OFF 비중은 안전자산으로. 신호 결측은 OFF. 현금성은 유지. 월초엔 해당 슬리브만 이동(나머지 비율 유지). 전월 말·asof 이전만 · 과거 시뮬.</p>
 
         <label class="toggle">
           <input type="checkbox" id="bandOn" />
@@ -208,7 +209,7 @@
             </select>
           </label>
         </div>
-        <p class="muted-note">전월 말 금 절대모멘텀이 단기채보다 높을 때만 금 슬리브 유지 · 선물(H)≠현물 · 환헤지·롤 비용은 기존 전환비용 외 미모형 · 과거 시뮬 · 투자 권유 아님</p>
+        <p class="muted-note">전월 말 금 절대모멘텀이 단기채보다 높을 때만 금 슬리브 유지 · 월초엔 슬리브만 갱신(나머지 보유 비율 유지) · 선물(H)≠현물 · 환헤지·롤 비용은 기존 전환비용 외 미모형 · 과거 시뮬 · 투자 권유 아님</p>
         <div class="row" id="customDates" style="display:none">
           <input type="date" id="startDate" />
           <input type="date" id="endDate" />
@@ -217,7 +218,7 @@
         <div class="section-title">월 적립 (DCA)</div>
         <label class="toggle">
           <input type="checkbox" id="dcaOn" />
-          <span>매월 첫 거래일에 현금 유입 후 목표 비중 매수</span>
+          <span>매월 첫 거래일에 현금 유입 후 목표 비중으로 추가 매수 (기존 보유 매도 없음 · 리밸런싱일엔 전체 재조정)</span>
         </label>
         <div class="row dca-row" id="dcaInputs" style="display:none">
           <label class="field">시작 원금(원)
@@ -325,6 +326,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=strat4v1"></script>
+  <script src="./app.js?v=rebalfix1"></script>
 </body>
 </html>

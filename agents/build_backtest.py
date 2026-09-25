@@ -2,7 +2,14 @@
 """Build agent: portfolio backtest engine (source of truth for review).
 
 Rebalancing: same-day mark-to-market THEN rebalance (do not zero rebalance-day returns).
-Monthly DCA: on first trading day of each month, add cash then buy to target weights.
+Full rebalance (every holding back to target) happens ONLY on real rebalance dates:
+calendar Q/Y/M (or band breach), MOM-like monthly swaps, and day 0.
+Monthly DCA: on first trading day of each month, add cash then BUY at current target
+weights (no selling). A calendar date that coincides does a full rebalance incl. the cash.
+Monthly overlays (regime hedge / sleeve trend / vol target / GOLDON) on non-calendar
+months: sleeve-only update. Overlays are re-applied to the DRIFTED core (virtual core
+book of base weights, drifting with prices since the last full rebalance), so the core
+holdings keep their relative drift; only overlay sleeves (hedge/cash/gold) are resized.
 Trading cost (mom_cost / trade cost): on each rebalance, value -= value × TO × rate
 where TO = 0.5 × Σ|w_new−w_old| (one-way turnover). Default rate 0.1% (0–0.5%).
 """
@@ -48,6 +55,8 @@ class Stats:
     gold_holding: str | None = None
     gold_log: list | None = None
     rebal_count: int = 0
+    sleeve_update_count: int = 0
+    dca_buy_count: int = 0
     band_applied: bool = False
     band_pct: float | None = None
     trade_cost: float = 0.001
@@ -943,8 +952,16 @@ def backtest(
     rebal_count = 0
     total_cost_drag = 0.0
 
-    def _target_weights(d: str) -> tuple[dict[str, float], list[str], bool | None]:
-        nonlocal last_regime, last_hedge, last_gold_on, last_gold_holding
+    # Monthly overlays (updated every new month, sleeve-only on non-calendar months)
+    monthly_overlay = bool(regime_hedge) or bool(gold_on) or vt_on or st_on
+    core_target: dict[str, float] = dict(tw)  # core base (post invVol/MA) at last full rebal
+    core_units: dict[str, float] = {}  # virtual core book (drifts with prices)
+    sleeve_update_count = 0
+    dca_buy_count = 0
+
+    def _core_base(d: str) -> dict[str, float]:
+        """Rebalance-date base: mode picks → invVol → MA overlay (calendar decisions)."""
+        nonlocal last_regime
         if rebalance == "MOM":
             _picked, base = _momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache
@@ -963,7 +980,6 @@ def backtest(
             )
         else:
             base = dict(tw)
-            _picked = list(codes)
 
         if use_inv:
             base = _inv_vol_weights(list(base.keys()), prices, d, vol_win, fallback_tw=base)
@@ -973,13 +989,19 @@ def backtest(
             last_regime = "on" if risk_on else "off"
             regime_log.append({"date": d, "regime": last_regime})
             base = _apply_ma_overlay(base, risk_on, cash_code, ma_cash_pct)
-        elif last_regime is None:
-            last_regime = None
+        return {c: w for c, w in base.items() if w > 0}
 
+    def _apply_monthly_overlays(
+        base: dict[str, float], d: str, log: bool = True
+    ) -> tuple[dict[str, float], list[str], bool | None]:
+        """regime hedge → sleeveTrend → volTarget → GOLDON (last)."""
+        nonlocal last_hedge, last_gold_on, last_gold_holding
+        base = dict(base)
         if regime_hedge and hedge_code_res:
             hedge_on = _regime_hedge_signal(prices, d, ma_win)
-            last_hedge = hedge_on
-            hedge_log.append({"date": d, "hedge": hedge_on})
+            if log:
+                last_hedge = hedge_on
+                hedge_log.append({"date": d, "hedge": hedge_on})
             pct = min(REGIME_HEDGE_MAX_PCT, max(0.0, float(regime_hedge_pct)))
             base = _apply_regime_hedge(base, hedge_on, hedge_code_res, pct)
 
@@ -999,24 +1021,52 @@ def backtest(
         if gold_on:
             gold_state = _gold_signal_on(d[:7], gold_lb, month_ends_cache, gold_hold)
             base = _apply_gold_sleeve(base, gold_state, gold_sleeve, gold_hold)
-            last_gold_on = gold_state
-            last_gold_holding = gold_hold if gold_state else GOLD_CASH
-            gold_log.append({
-                "date": d,
-                "month": d[:7],
-                "on": gold_state,
-                "holding": last_gold_holding,
-                "weights": dict(base),
-            })
+            if log:
+                last_gold_on = gold_state
+                last_gold_holding = gold_hold if gold_state else GOLD_CASH
+                gold_log.append({
+                    "date": d,
+                    "month": d[:7],
+                    "on": gold_state,
+                    "holding": last_gold_holding,
+                    "weights": dict(base),
+                })
 
         active = [c for c, w in base.items() if w > 0]
         return base, active, gold_state
 
+    def _target_weights(d: str):
+        core = _core_base(d)
+        full, active, gold_state = _apply_monthly_overlays(core, d, log=True)
+        return core, full, active, gold_state
+
+    def _reset_core_book(d: str, v: float) -> None:
+        nonlocal core_units
+        core_units = {c: (w * v) / prices[c][d] for c, w in core_target.items() if w > 0}
+
+    def _core_drift_weights(d: str) -> dict[str, float]:
+        cv = sum(u * prices[c][d] for c, u in core_units.items())
+        if not (cv > 0):
+            return dict(core_target)
+        return {c: (u * prices[c][d]) / cv for c, u in core_units.items() if u > 0}
+
+    def _core_add_cash(d: str, value_pre: float, contrib: float) -> None:
+        """Virtual core: rescale to pre-cash portfolio value, then buy cash at core target."""
+        cv = sum(u * prices[c][d] for c, u in core_units.items())
+        if cv > 0 and value_pre > 0:
+            k = value_pre / cv
+            for c in list(core_units):
+                core_units[c] *= k
+        for c, w in core_target.items():
+            if w > 0:
+                core_units[c] = core_units.get(c, 0.0) + (contrib * w) / prices[c][d]
+
     for d in common:
         if units is None:
             # Day 0
-            current_tw, active_codes, g_state = _target_weights(d)
+            core_target, current_tw, active_codes, g_state = _target_weights(d)
             units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+            _reset_core_book(d, value)
             prev_holdings = set(active_codes)
             if gold_on:
                 prev_gold_state = g_state
@@ -1033,38 +1083,77 @@ def backtest(
             if prev_value is not None and prev_value > 0:
                 rets.append((d, value / prev_value - 1.0))
 
-            # 2) Monthly DCA cash inflow on first trading day of new month
-            # Band mode: ignore Q/Y/M calendar; check drift daily vs last targets.
-            # MOM/DMOM: band_active is False → keep monthly calendar.
+            new_month = _is_new_month(prev, d)
+            # Full rebalance ONLY on real rebalance dates (calendar Q/Y/M, MOM-like
+            # monthly, or band breach below). Band mode ignores the calendar.
             if band_active:
-                do_rebal = False
+                do_full = False
             else:
-                do_rebal = _is_rebal(prev, d, rebalance)
-            # 국면 헤지(실험): 헤지 슬리브는 월 1회만 갱신
-            if regime_hedge and _is_new_month(prev, d):
-                do_rebal = True
-            # GOLDON: month-start timing same as MOM
-            if gold_on and _is_new_month(prev, d):
-                do_rebal = True
-            if (vt_on or st_on) and _is_new_month(prev, d):
-                do_rebal = True
-            if monthly_contribution > 0 and _is_new_month(prev, d):
-                value += monthly_contribution
-                total_invested += monthly_contribution
+                do_full = _is_rebal(prev, d, rebalance)
+
+            # 2) Monthly DCA cash inflow on first trading day of new month
+            contrib = 0.0
+            value_pre = value
+            if monthly_contribution > 0 and new_month:
+                contrib = float(monthly_contribution)
+                value += contrib
+                total_invested += contrib
                 contributions += 1
-                do_rebal = True  # deploy cash to target weights
-            # Band drift (after MTM / optional DCA cash): any |w-target| > band
-            if band_active and _band_drift_exceeds(
+
+            # 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
+            # Core holdings keep their relative drift (no reset to target weights).
+            overlay_month = monthly_overlay and new_month
+            if not do_full and (contrib > 0 or overlay_month):
+                w_old = _current_weights(units, prices, d, value)
+                if contrib > 0:
+                    _core_add_cash(d, value_pre, contrib)
+                if overlay_month:
+                    drifted = _core_drift_weights(d)
+                    sleeve_tw, sleeve_active, g_state = _apply_monthly_overlays(
+                        drifted, d, log=True
+                    )
+                    # Full-target weights at current overlay state: DCA buys + band ref
+                    current_tw = _apply_monthly_overlays(core_target, d, log=False)[0]
+                    new_units = {
+                        c: (sleeve_tw[c] * value_pre) / prices[c][d] for c in sleeve_active
+                    }
+                    sleeve_update_count += 1
+                    if gold_on:
+                        prev_gold_state = g_state
+                else:
+                    new_units = dict(units)
+                if contrib > 0:
+                    dca_buy_count += 1
+                    for c, w in current_tw.items():
+                        if w > 0:
+                            new_units[c] = new_units.get(c, 0.0) + (contrib * w) / prices[c][d]
+                # Unified cost on actual trades: TO = 0.5 × Σ|w_new − w_old|
+                # (a pure cash buy costs 0.5 × contrib × rate, same as before).
+                if cost > 0:
+                    w_new = _current_weights(new_units, prices, d, value)
+                    turnover = _one_way_turnover(w_old, w_new)
+                    if turnover > 0:
+                        drag = value * turnover * cost
+                        total_cost_drag += drag
+                        k = 1.0 - turnover * cost
+                        new_units = {c: u * k for c, u in new_units.items()}
+                units = {c: u for c, u in new_units.items() if u > 0}
+                active_codes = list(units.keys())
+                prev_holdings = set(active_codes)
+                value = sum(units[c] * prices[c][d] for c in active_codes)
+
+            # Band drift (after MTM / DCA / sleeve update): any |w-target| > band
+            if band_active and not do_full and _band_drift_exceeds(
                 units, prices, d, value, current_tw, band_pct_c
             ):
-                do_rebal = True
+                do_full = True
 
-            # 3) Rebalance after MTM (+ optional cash)
-            if do_rebal:
+            # 3b) Full rebalance after MTM (+ optional cash)
+            if do_full:
                 rebal_count += 1
                 # Pre-trade weights after MTM (+ optional DCA cash)
                 w_old = _current_weights(units, prices, d, value)
-                new_tw, new_active, g_state = _target_weights(d)
+                core_target, new_tw, new_active, g_state = _target_weights(d)
                 new_set = set(new_active)
                 # Unified turnover cost (calendar / band / MOM / gold flip via weight change):
                 # drag = value × one_way_turnover × cost_rate
@@ -1080,6 +1169,7 @@ def backtest(
                 current_tw = new_tw
                 active_codes = new_active
                 units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
+                _reset_core_book(d, value)
                 prev_holdings = new_set
                 if mom_like:
                     mom_holdings.append({
@@ -1174,6 +1264,8 @@ def backtest(
         gold_holding=last_gold_holding if gold_on else None,
         gold_log=gold_log if gold_on else None,
         rebal_count=rebal_count,
+        sleeve_update_count=sleeve_update_count,
+        dca_buy_count=dca_buy_count,
         band_applied=band_active,
         band_pct=band_pct_c if band_active else None,
         trade_cost=cost,

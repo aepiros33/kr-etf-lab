@@ -575,7 +575,7 @@ def main():
             fail("regime hedge missing hedge_log")
         if rh.hedge_active is None:
             fail("regime hedge missing hedge_active")
-        # Monthly rebalance forced: more target updates than pure Q if hedge months differ
+        # Hedge sleeve updated monthly (sleeve-only on non-calendar months; core keeps drift)
         bh = backtest(
             {"069500": 0.6, "133690": 0.4},
             prices,
@@ -968,8 +968,71 @@ def main():
     if st.mdd > 1e-12:
         fail(f"sleeveTrend MDD > 0: {st.mdd}")
 
+    # --- Rebalance-fix (rebalfix1): overlays / monthly DCA must NOT collapse Q/Y/N into monthly ---
+    # Non-calendar months: DCA = buy at target weights only; overlays = sleeve-only update
+    # on the drifted core. Full rebalance only on calendar (or band) dates.
+    rf_w = {"133690": 60, "069500": 20, "148070": 20}
+    rf_gold = GOLD_CODE_FUTURES if GOLD_CODE_FUTURES in prices else GOLD_CODE
+    if all(c in prices for c in rf_w) and rf_gold in prices and GOLD_CASH in prices:
+        rf_start = "1990-01-01"  # longest common window
+        rf_cases = {
+            "goldon": dict(gold_on=True, gold_sleeve_pct=0.15, gold_code=rf_gold),
+            "dca": dict(initial_capital=10_000_000, monthly_contribution=500_000),
+        }
+        for tag, kw in rf_cases.items():
+            rr = {
+                m: backtest(rf_w, prices, start=rf_start, rebalance=m, **kw)
+                for m in ("N", "Y", "Q", "M")
+            }
+            for a, b in (("Q", "Y"), ("N", "Q"), ("Y", "M")):
+                if abs(rr[a].final_value - rr[b].final_value) <= 1e-9 * abs(rr[b].final_value):
+                    fail(f"rebalfix {tag}: {a} == {b} (final {rr[a].final_value}) — overlay/DCA forcing full rebalance?")
+            if not (rr["N"].rebal_count == 0 and rr["Y"].rebal_count < rr["Q"].rebal_count < rr["M"].rebal_count):
+                fail(
+                    f"rebalfix {tag}: rebal_count order N0<Y<Q<M violated "
+                    f"{[rr[m].rebal_count for m in 'NYQM']}"
+                )
+            if tag == "goldon":
+                if rr["N"].sleeve_update_count < 12 or rr["M"].sleeve_update_count != 0:
+                    fail(f"rebalfix goldon sleeve_update_count N={rr['N'].sleeve_update_count} M={rr['M'].sleeve_update_count}")
+                # Sleeve-only: with N, core holdings keep relative drift (ratio follows prices only)
+                gl = [e for e in (rr["N"].gold_log or [])]
+                if len(gl) >= 3:
+                    e0, e1 = gl[0], gl[-1]
+                    w0, w1 = e0["weights"], e1["weights"]
+                    if all(c in w0 and c in w1 for c in ("133690", "069500")):
+                        got = w1["133690"] / w1["069500"]
+                        exp = (w0["133690"] / w0["069500"]) * (
+                            (prices["133690"][e1["date"]] / prices["133690"][e0["date"]])
+                            / (prices["069500"][e1["date"]] / prices["069500"][e0["date"]])
+                        )
+                        if abs(got / exp - 1.0) > 1e-9:
+                            fail(f"rebalfix goldon N: core ratio reset (got {got} want {exp})")
+            if tag == "dca":
+                if rr["N"].dca_buy_count < 12:
+                    fail(f"rebalfix dca: N should buy monthly ({rr['N'].dca_buy_count})")
+                if rr["M"].dca_buy_count != 0:
+                    fail("rebalfix dca: M deploys cash inside full monthly rebalance (dca_buy_count 0)")
+                if rr["Q"].contributions != rr["M"].contributions:
+                    fail("rebalfix dca: contributions must not depend on rebalance mode")
+        # Plain lump-sum paths unchanged by overlays-off: M with gold/DCA still monthly full
+        rf_vt = {
+            m: backtest(rf_w, prices, start=rf_start, rebalance=m, vol_target=True, vol_target_pct=0.10)
+            for m in ("Y", "Q")
+        }
+        if abs(rf_vt["Y"].final_value - rf_vt["Q"].final_value) <= 1e-9 * abs(rf_vt["Q"].final_value):
+            fail("rebalfix volTarget: Y == Q")
+        print(
+            f"rebalfix ok: {'/'.join(rf_w)} longest · goldon Q≠Y≠M·N≠Q · dca Q≠Y≠M·N≠Q · volTarget Y≠Q"
+        )
+    else:
+        fail("rebalfix: 133690/069500/148070 + gold/cash prices required")
+
     app_js_chk = (ROOT / "app.js").read_text(encoding="utf-8")
-    for needle in ("MOM12_1", "XSMOM", "volTarget", "sleeveTrend", "momentumPick12_1", "xsMomentumPick"):
+    for needle in (
+        "MOM12_1", "XSMOM", "volTarget", "sleeveTrend", "momentumPick12_1", "xsMomentumPick",
+        "applyMonthlyOverlays", "coreDriftWeights", "coreAddCash", "sleeveUpdateCount", "dcaBuyCount",
+    ):
         if needle not in app_js_chk:
             fail(f"JS parity needle missing: {needle}")
     idx_chk = (ROOT / "index.html").read_text(encoding="utf-8")
