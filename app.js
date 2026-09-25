@@ -522,6 +522,7 @@ function syncControlsFromState() {
   setChk("maOverlay", state.maOverlay);
   setVal("maWindow", String(state.maWindow));
   setVal("maSignalFreq", normMaSignalFreq(state.maSignalFreq));
+  syncMaFreqHint();
   setVal("cashCode", state.cashCode);
   setChk("regimeHedge", state.regimeHedge);
   setVal("regimeHedgeMode", state.regimeHedgeMode);
@@ -959,6 +960,7 @@ async function boot() {
   if (shared && (shared.get("preset") || shared.get("h"))) {
     await applyShareParams(shared);
     // syncStratControls is wired on DOMContentLoaded; call after controls exist
+    syncMaFreqHint();
     const maRow = $("#maOverlayRow");
     if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
     const rhRow = $("#regimeHedgeRow");
@@ -2078,6 +2080,15 @@ function maRiskOn(benchPrices, asof, window = 200) {
 const MA_SIGNAL_FREQS = ["monthly", "rebal"];
 function normMaSignalFreq(v) {
   return v === "rebal" ? "rebal" : "monthly";
+}
+/** UI-only hint: 'rebal' MA signal + rebalance N (no band) → MA state is never checked (0 switches). */
+function syncMaFreqHint() {
+  if (typeof document === "undefined" || !document.getElementById) return;
+  const el = document.getElementById("maFreqHint");
+  if (!el) return;
+  const show =
+    !!state.maOverlay && normMaSignalFreq(state.maSignalFreq) === "rebal" && state.rebalance === "N" && !state.bandOn;
+  el.style.display = show ? "block" : "none";
 }
 /** Month-start cutoff: signal uses closes strictly before YYYY-MM-01 (previous month-end). */
 function maMonthAsof(d) {
@@ -4490,6 +4501,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (stRow) stRow.style.display = state.sleeveTrend ? "flex" : "none";
     const stHint = $("#sleeveTrendHint");
     if (stHint) stHint.style.display = state.sleeveTrend ? "block" : "none";
+    syncMaFreqHint();
     const bandHint = $("#bandHint");
     if (bandHint) {
       const mom =
@@ -4629,6 +4641,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (maFreqEl)
     maFreqEl.onchange = (e) => {
       state.maSignalFreq = normMaSignalFreq(e.target.value);
+      syncMaFreqHint();
     };
   const cashEl = $("#cashCode");
   if (cashEl)
