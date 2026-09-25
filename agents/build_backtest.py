@@ -10,6 +10,13 @@ Monthly overlays (regime hedge / sleeve trend / vol target / GOLDON) on non-cale
 months: sleeve-only update. Overlays are re-applied to the DRIFTED core (virtual core
 book of base weights, drifting with prices since the last full rebalance), so the core
 holdings keep their relative drift; only overlay sleeves (hedge/cash/gold) are resized.
+MA overlay signal (ma_signal_freq='monthly', default): evaluated at every month start
+from the PREVIOUS month-end close vs its SMA (closes strictly before YYYY-MM-01, no
+look-ahead), independent of the Q/Y/M/N calendar. It is the first monthly overlay
+(MA → regime → sleeveTrend → volTarget → GOLDON) applied to the drifting pre-MA core, so
+a flip on a non-calendar month moves only the risky part to/from cash (sleeve update).
+ma_signal_freq='rebal' reproduces the legacy behavior (MA only on full-rebalance dates).
+invVol weighting still updates only on full-rebalance dates.
 Trading cost (mom_cost / trade cost): on each rebalance, value -= value × TO × rate
 where TO = 0.5 × Σ|w_new−w_old| (one-way turnover). Default rate 0.1% (0–0.5%).
 """
@@ -57,6 +64,8 @@ class Stats:
     rebal_count: int = 0
     sleeve_update_count: int = 0
     dca_buy_count: int = 0
+    ma_switch_count: int = 0
+    ma_signal_freq: str | None = None
     band_applied: bool = False
     band_pct: float | None = None
     trade_cost: float = 0.001
@@ -536,15 +545,31 @@ def _inv_vol_weights(
     return {c: inv[c] / s for c in inv}
 
 
-def _ma_risk_on(bench_prices: dict[str, float], asof: str, window: int = 200) -> bool:
-    """Risk-on if prior close >= SMA(window) using closes strictly before asof."""
+def _ma_signal(
+    bench_prices: dict[str, float], asof: str, window: int = 200
+) -> tuple[bool, str | None]:
+    """(risk_on, signal_close_date): prior close >= SMA(window), closes strictly before asof."""
     dates = sorted(d for d in bench_prices if d < asof)
     if len(dates) < window:
-        return True  # insufficient history → leave strategy weights unchanged
+        # insufficient history → leave strategy weights unchanged
+        return True, (dates[-1] if dates else None)
     window_dates = dates[-window:]
     sma = sum(bench_prices[d] for d in window_dates) / window
     prior = bench_prices[dates[-1]]
-    return prior >= sma
+    return prior >= sma, dates[-1]
+
+
+def _ma_risk_on(bench_prices: dict[str, float], asof: str, window: int = 200) -> bool:
+    """Risk-on if prior close >= SMA(window) using closes strictly before asof."""
+    return _ma_signal(bench_prices, asof, window)[0]
+
+
+MA_SIGNAL_FREQS = ("monthly", "rebal")
+
+
+def _ma_month_asof(d: str) -> str:
+    """Month-start cutoff: signal uses closes strictly before YYYY-MM-01 (prev month-end)."""
+    return d[:7] + "-01"
 
 
 def _apply_ma_overlay(
@@ -823,6 +848,7 @@ def backtest(
     sleeve_trend_mode: str = "abs",
     sleeve_trend_lookback: int = 1,
     etf_flags: dict[str, dict] | None = None,
+    ma_signal_freq: str = "monthly",
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -952,16 +978,25 @@ def backtest(
     rebal_count = 0
     total_cost_drag = 0.0
 
+    # MA signal frequency: 'monthly' (default) = month-start signal, overlay on drifting
+    # pre-MA core; 'rebal' = legacy (MA inside the core, only on full-rebalance dates).
+    ma_freq = "rebal" if str(ma_signal_freq) == "rebal" else "monthly"
+    ma_monthly = bool(ma_overlay) and ma_freq == "monthly"
+    ma_in_core = bool(ma_overlay) and not ma_monthly
+    ma_state: bool | None = None  # month-start MA state currently applied (monthly mode)
+    ma_switch_count = 0
+
     # Monthly overlays (updated every new month, sleeve-only on non-calendar months)
     monthly_overlay = bool(regime_hedge) or bool(gold_on) or vt_on or st_on
-    core_target: dict[str, float] = dict(tw)  # core base (post invVol/MA) at last full rebal
+    # core base (post invVol; + MA only in 'rebal' mode) at last full rebal
+    core_target: dict[str, float] = dict(tw)
     core_units: dict[str, float] = {}  # virtual core book (drifts with prices)
     sleeve_update_count = 0
     dca_buy_count = 0
 
     def _core_base(d: str) -> dict[str, float]:
-        """Rebalance-date base: mode picks → invVol → MA overlay (calendar decisions)."""
-        nonlocal last_regime
+        """Rebalance-date base: mode picks → invVol (→ MA overlay in 'rebal' mode)."""
+        nonlocal last_regime, ma_switch_count
         if rebalance == "MOM":
             _picked, base = _momentum_pick(
                 codes, prices, d[:7], lookback, top_n, month_ends_cache
@@ -984,19 +1019,36 @@ def backtest(
         if use_inv:
             base = _inv_vol_weights(list(base.keys()), prices, d, vol_win, fallback_tw=base)
 
-        if ma_overlay:
-            risk_on = _ma_risk_on(prices[BENCH_CODE], d, ma_win)
-            last_regime = "on" if risk_on else "off"
-            regime_log.append({"date": d, "regime": last_regime})
+        if ma_in_core:
+            risk_on, sig_d = _ma_signal(prices[BENCH_CODE], d, ma_win)
+            new_regime = "on" if risk_on else "off"
+            if last_regime is not None and new_regime != last_regime:
+                ma_switch_count += 1
+            last_regime = new_regime
+            regime_log.append({"date": d, "regime": last_regime, "signal_date": sig_d})
             base = _apply_ma_overlay(base, risk_on, cash_code, ma_cash_pct)
         return {c: w for c, w in base.items() if w > 0}
+
+    def _eval_ma_month(d: str) -> bool:
+        """Monthly MA signal at month start (prev month-end close). Returns True on flip."""
+        nonlocal ma_state, last_regime, ma_switch_count
+        risk_on, sig_d = _ma_signal(prices[BENCH_CODE], _ma_month_asof(d), ma_win)
+        flipped = ma_state is not None and risk_on != ma_state
+        if flipped:
+            ma_switch_count += 1
+        ma_state = risk_on
+        last_regime = "on" if risk_on else "off"
+        regime_log.append({"date": d, "regime": last_regime, "signal_date": sig_d})
+        return flipped
 
     def _apply_monthly_overlays(
         base: dict[str, float], d: str, log: bool = True
     ) -> tuple[dict[str, float], list[str], bool | None]:
-        """regime hedge → sleeveTrend → volTarget → GOLDON (last)."""
+        """(MA monthly →) regime hedge → sleeveTrend → volTarget → GOLDON (last)."""
         nonlocal last_hedge, last_gold_on, last_gold_holding
         base = dict(base)
+        if ma_monthly:
+            base = _apply_ma_overlay(base, bool(ma_state), cash_code, ma_cash_pct)
         if regime_hedge and hedge_code_res:
             hedge_on = _regime_hedge_signal(prices, d, ma_win)
             if log:
@@ -1064,6 +1116,8 @@ def backtest(
     for d in common:
         if units is None:
             # Day 0
+            if ma_monthly:
+                _eval_ma_month(d)
             core_target, current_tw, active_codes, g_state = _target_weights(d)
             units = {c: (current_tw[c] * value) / prices[c][d] for c in active_codes}
             _reset_core_book(d, value)
@@ -1084,6 +1138,8 @@ def backtest(
                 rets.append((d, value / prev_value - 1.0))
 
             new_month = _is_new_month(prev, d)
+            # Monthly MA signal (month start, prev month-end close) regardless of calendar
+            ma_flip = _eval_ma_month(d) if (ma_monthly and new_month) else False
             # Full rebalance ONLY on real rebalance dates (calendar Q/Y/M, MOM-like
             # monthly, or band breach below). Band mode ignores the calendar.
             if band_active:
@@ -1102,7 +1158,9 @@ def backtest(
 
             # 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
             # Core holdings keep their relative drift (no reset to target weights).
-            overlay_month = monthly_overlay and new_month
+            # MA alone updates its sleeve only on a flip (only the switched amount trades);
+            # with other monthly overlays it is re-applied every month in the chain.
+            overlay_month = new_month and (monthly_overlay or ma_flip)
             if not do_full and (contrib > 0 or overlay_month):
                 w_old = _current_weights(units, prices, d, value)
                 if contrib > 0:
@@ -1266,6 +1324,8 @@ def backtest(
         rebal_count=rebal_count,
         sleeve_update_count=sleeve_update_count,
         dca_buy_count=dca_buy_count,
+        ma_switch_count=ma_switch_count if ma_overlay else 0,
+        ma_signal_freq=ma_freq if ma_overlay else None,
         band_applied=band_active,
         band_pct=band_pct_c if band_active else None,
         trade_cost=cost,

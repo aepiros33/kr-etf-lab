@@ -147,6 +147,7 @@ const state = {
   volWindow: 60,
   maOverlay: false,
   maWindow: 200,
+  maSignalFreq: "monthly", // monthly (month-start signal, default) | rebal (legacy: rebalance dates only)
   cashCode: "153130",
   maCashPct: 1.0,
   regimeHedge: false,
@@ -412,6 +413,7 @@ function encodeShareParams() {
   if (state.maOverlay) {
     p.set("ma", "1");
     p.set("mw", String(state.maWindow || 200));
+    if (normMaSignalFreq(state.maSignalFreq) === "rebal") p.set("maf", "rebal");
   }
   if (
     state.rebalance === "DMOM" ||
@@ -519,6 +521,7 @@ function syncControlsFromState() {
   setVal("weighting", state.weighting);
   setChk("maOverlay", state.maOverlay);
   setVal("maWindow", String(state.maWindow));
+  setVal("maSignalFreq", normMaSignalFreq(state.maSignalFreq));
   setVal("cashCode", state.cashCode);
   setChk("regimeHedge", state.regimeHedge);
   setVal("regimeHedgeMode", state.regimeHedgeMode);
@@ -614,6 +617,7 @@ async function applyShareParams(params) {
   state.weighting = params.get("w") === "invVol" ? "invVol" : "fixed";
   state.maOverlay = params.get("ma") === "1";
   if (params.get("mw")) state.maWindow = Number(params.get("mw")) === 100 ? 100 : 200;
+  state.maSignalFreq = normMaSignalFreq(params.get("maf"));
   if (params.get("cash")) state.cashCode = params.get("cash");
   state.regimeHedge = params.get("rh") === "1";
   if (params.get("rhm")) state.regimeHedgeMode = params.get("rhm") === "cash" ? "cash" : "inverse";
@@ -711,6 +715,7 @@ function exportRunCsv() {
     ["momTopN", state.momTopN],
     ["maOverlay", state.maOverlay],
     ["maWindow", state.maWindow],
+    ["maSignalFreq", normMaSignalFreq(state.maSignalFreq)],
     ["cashCode", state.cashCode],
     ["regimeHedge", state.regimeHedge],
     ["regimeHedgeMode", state.regimeHedgeMode],
@@ -749,6 +754,7 @@ function exportRunCsv() {
     ["finalValue", r.finalValue],
     ["rebalCount", r.rebalCount != null ? r.rebalCount : ""],
     ["sleeveUpdateCount", r.sleeveUpdateCount != null ? r.sleeveUpdateCount : ""],
+    ["maSwitchCount", r.maSignalFreq ? r.maSwitchCount : ""],
     ["dcaBuyCount", r.dcaBuyCount != null ? r.dcaBuyCount : ""],
     ["bandApplied", !!r.bandApplied],
     ["tradeCost", r.tradeCost != null ? r.tradeCost : ""],
@@ -1672,6 +1678,7 @@ async function run() {
       volWindow: state.volWindow,
       maOverlay: state.maOverlay,
       maWindow: state.maWindow,
+      maSignalFreq: normMaSignalFreq(state.maSignalFreq),
       cashCode: state.cashCode || "153130",
       maCashPct: state.maCashPct,
       regimeHedge: state.regimeHedge,
@@ -2049,17 +2056,32 @@ function invVolWeights(codes, priceMap, asof, window = 60, fallbackTw = null) {
   return Object.fromEntries(keys.map((c) => [c, inv[c] / s]));
 }
 
-function maRiskOn(benchPrices, asof, window = 200) {
+/** [riskOn, signalCloseDate]: prior close >= SMA(window), closes strictly before asof. */
+function maSignal(benchPrices, asof, window = 200) {
   const dates = Object.keys(benchPrices)
     .filter((d) => d < asof)
     .sort();
-  if (dates.length < window) return true;
+  if (dates.length < window) return [true, dates.length ? dates[dates.length - 1] : null];
   const windowDates = dates.slice(-window);
   let sum = 0;
   for (const d of windowDates) sum += benchPrices[d];
   const sma = sum / window;
   const prior = benchPrices[dates[dates.length - 1]];
-  return prior >= sma;
+  return [prior >= sma, dates[dates.length - 1]];
+}
+
+function maRiskOn(benchPrices, asof, window = 200) {
+  return maSignal(benchPrices, asof, window)[0];
+}
+
+/** MA signal frequency: "monthly" (default, month-start) | "rebal" (legacy, rebalance dates only). */
+const MA_SIGNAL_FREQS = ["monthly", "rebal"];
+function normMaSignalFreq(v) {
+  return v === "rebal" ? "rebal" : "monthly";
+}
+/** Month-start cutoff: signal uses closes strictly before YYYY-MM-01 (previous month-end). */
+function maMonthAsof(d) {
+  return d.slice(0, 7) + "-01";
 }
 
 function applyMaOverlay(tw, riskOn, cashCode, maCashPct) {
@@ -2261,7 +2283,12 @@ function updateTradeCostLabel() {
  * months: sleeve-only update — overlays re-applied to the drifted core (virtual core
  * book since last full rebalance), core keeps its relative drift.
  * Trading cost: value -= value × TO × rate (TO = one-way turnover of actual trades).
- * weighting invVol / maOverlay applied on rebalance days (and day 0).
+ * weighting invVol applied on rebalance days (and day 0).
+ * maOverlay (maSignalFreq "monthly", default): month-start signal from the previous
+ * month-end close (closes < YYYY-MM-01), independent of the calendar; first monthly
+ * overlay (MA → regime → sleeveTrend → volTarget → GOLDON) on the drifting pre-MA core,
+ * so a non-calendar flip moves only the risky part to/from cash (sleeve update).
+ * maSignalFreq "rebal" = legacy (MA inside the core, only on full-rebalance dates).
  * Numbers are computed only here (and in agents/build_backtest.py).
  */
 function backtest(
@@ -2291,6 +2318,9 @@ function backtest(
   const maWindow = Math.max(2, Number(opts.maWindow) || 200);
   const cashCode = opts.cashCode || "153130";
   const maCashPct = opts.maCashPct != null ? Number(opts.maCashPct) : 1.0;
+  const maFreq = normMaSignalFreq(opts.maSignalFreq);
+  const maMonthly = maOverlay && maFreq === "monthly";
+  const maInCore = maOverlay && !maMonthly;
   const regimeHedge = !!opts.regimeHedge;
   const regimeHedgeMode = opts.regimeHedgeMode === "cash" ? "cash" : "inverse";
   const regimeHedgePct = Math.min(
@@ -2434,15 +2464,20 @@ function backtest(
   const curve = [],
     rets = [];
 
+  // MA signal: month-start state currently applied (monthly mode) + flip count
+  let maState = null;
+  let maSwitchCount = 0;
+
   // Monthly overlays (updated every new month; sleeve-only on non-calendar months)
   const monthlyOverlay = regimeHedge || goldOn || volTargetOn || sleeveTrendOn;
-  let coreTarget = { ...tw }; // core base (post invVol/MA) at last full rebalance
+  // core base (post invVol; + MA only in "rebal" mode) at last full rebalance
+  let coreTarget = { ...tw };
   let coreUnits = {}; // virtual core book (drifts with prices)
   let sleeveUpdateCount = 0;
   let dcaBuyCount = 0;
 
   function coreBase(d) {
-    // Rebalance-date base: mode picks → invVol → MA overlay (calendar decisions)
+    // Rebalance-date base: mode picks → invVol (→ MA overlay in "rebal" mode)
     let base;
     if (rebalance === "MOM") {
       [, base] = momentumPick(codes, priceMap, d.slice(0, 7), lookback, topN, monthEndsCache);
@@ -2466,18 +2501,32 @@ function backtest(
     if (weighting === "invVol") {
       base = invVolWeights(Object.keys(base), priceMap, d, volWindow, base);
     }
-    if (maOverlay) {
-      const riskOn = maRiskOn(priceMap[BENCH], d, maWindow);
-      lastRegime = riskOn ? "on" : "off";
-      regimeLog.push({ date: d, regime: lastRegime });
+    if (maInCore) {
+      const [riskOn, sigD] = maSignal(priceMap[BENCH], d, maWindow);
+      const newRegime = riskOn ? "on" : "off";
+      if (lastRegime != null && newRegime !== lastRegime) maSwitchCount += 1;
+      lastRegime = newRegime;
+      regimeLog.push({ date: d, regime: lastRegime, signalDate: sigD });
       base = applyMaOverlay(base, riskOn, cashCode, maCashPct);
     }
     return Object.fromEntries(Object.entries(base).filter(([, w]) => w > 0));
   }
 
+  function evalMaMonth(d) {
+    // Monthly MA signal at month start (previous month-end close). Returns true on flip.
+    const [riskOn, sigD] = maSignal(priceMap[BENCH], maMonthAsof(d), maWindow);
+    const flipped = maState != null && riskOn !== maState;
+    if (flipped) maSwitchCount += 1;
+    maState = riskOn;
+    lastRegime = riskOn ? "on" : "off";
+    regimeLog.push({ date: d, regime: lastRegime, signalDate: sigD });
+    return flipped;
+  }
+
   function applyMonthlyOverlays(baseIn, d, log = true) {
-    // regime hedge → sleeveTrend → volTarget → GOLDON (last)
+    // (MA monthly →) regime hedge → sleeveTrend → volTarget → GOLDON (last)
     let base = { ...baseIn };
+    if (maMonthly) base = applyMaOverlay(base, !!maState, cashCode, maCashPct);
     if (regimeHedge && hedgeCodeRes) {
       const hedgeOn = regimeHedgeSignal(priceMap, d, maWindow);
       if (log) {
@@ -2576,6 +2625,7 @@ function backtest(
   for (const d of common) {
     if (!units) {
       let gState;
+      if (maMonthly) evalMaMonth(d);
       [coreTarget, currentTw, activeCodes, gState] = targetWeights(d);
       units = Object.fromEntries(activeCodes.map((c) => [c, (currentTw[c] * value) / priceMap[c][d]]));
       resetCoreBook(d, value);
@@ -2591,6 +2641,8 @@ function backtest(
       if (prevValue != null && prevValue > 0) rets.push([d, value / prevValue - 1]);
 
       const newMonth = isNewMonth(prev, d);
+      // Monthly MA signal (month start, previous month-end close) regardless of calendar
+      const maFlip = maMonthly && newMonth ? evalMaMonth(d) : false;
       // Full rebalance ONLY on real rebalance dates (calendar Q/Y/M, MOM-like monthly,
       // or band breach below). Band mode ignores the calendar.
       let doFull = bandActive ? false : isRebal(prev, d);
@@ -2607,7 +2659,9 @@ function backtest(
 
       // 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
       // Core holdings keep their relative drift (no reset to target weights).
-      const overlayMonth = monthlyOverlay && newMonth;
+      // MA alone updates its sleeve only on a flip (only the switched amount trades);
+      // with other monthly overlays it is re-applied every month in the chain.
+      const overlayMonth = newMonth && (monthlyOverlay || maFlip);
       if (!doFull && (contrib > 0 || overlayMonth)) {
         const wOld = currentWeights(units, priceMap, d, value);
         if (contrib > 0) coreAddCash(d, valuePre, contrib);
@@ -2766,6 +2820,8 @@ function backtest(
     rebalCount,
     sleeveUpdateCount,
     dcaBuyCount,
+    maSwitchCount: maOverlay ? maSwitchCount : 0,
+    maSignalFreq: maOverlay ? maFreq : null,
     bandApplied: bandActive,
     bandPct: bandActive ? bandPctC : null,
     tradeCost: momCost,
@@ -3458,6 +3514,7 @@ function buildSensitivityOptsFromState() {
     volWindow: state.volWindow,
     maOverlay: state.maOverlay,
     maWindow: state.maWindow,
+    maSignalFreq: normMaSignalFreq(state.maSignalFreq),
     cashCode: state.cashCode || "153130",
     maCashPct: state.maCashPct,
     regimeHedge: state.regimeHedge,
@@ -3681,6 +3738,7 @@ function currentStrategyCfg() {
     volWindow: state.volWindow,
     maOverlay: state.maOverlay,
     maWindow: state.maWindow,
+    maSignalFreq: normMaSignalFreq(state.maSignalFreq),
     cashCode: state.cashCode || "153130",
     maCashPct: state.maCashPct,
     regimeHedge: state.regimeHedge,
@@ -3842,6 +3900,7 @@ async function executePortBacktest(picks, start, end, cfg) {
     volWindow: cfg.volWindow,
     maOverlay: cfg.maOverlay,
     maWindow: cfg.maWindow,
+    maSignalFreq: normMaSignalFreq(cfg.maSignalFreq),
     cashCode: cfg.cashCode || "153130",
     maCashPct: cfg.maCashPct,
     regimeHedge: cfg.regimeHedge,
@@ -4233,7 +4292,7 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
     : "";
   const momTable = renderMomHoldings(r.momHoldings);
   const regimeNote = r.lastRegime
-    ? `<div class="warn">이동평균 트렌드 오버레이 · 최근 국면: <strong>${r.lastRegime === "on" ? "위험온" : "위험오프"}</strong> · MA${state.maWindow} · 안전자산 ${state.cashCode} · 파라미터 민감 · 투자 자문 아님</div>`
+    ? `<div class="warn">이동평균 트렌드 오버레이 · 최근 국면: <strong>${r.lastRegime === "on" ? "위험온" : "위험오프"}</strong> · MA${state.maWindow} · 안전자산 ${state.cashCode}${r.maSignalFreq === "rebal" ? " · 신호: 리밸 주기에 맞춤" : " · 신호: 매월(월초·전월 말 종가)"} · 국면 전환 ${r.maSwitchCount || 0}회 · 파라미터 민감 · 투자 자문 아님</div>`
     : "";
   const hedgeNote =
     r.hedgeLog
@@ -4565,6 +4624,11 @@ document.addEventListener("DOMContentLoaded", () => {
     maWin.onchange = (e) => {
       const v = Number(e.target.value);
       state.maWindow = v === 100 ? 100 : 200;
+    };
+  const maFreqEl = $("#maSignalFreq");
+  if (maFreqEl)
+    maFreqEl.onchange = (e) => {
+      state.maSignalFreq = normMaSignalFreq(e.target.value);
     };
   const cashEl = $("#cashCode");
   if (cashEl)

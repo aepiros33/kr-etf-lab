@@ -1028,10 +1028,121 @@ def main():
     else:
         fail("rebalfix: 133690/069500/148070 + gold/cash prices required")
 
+    # --- MA monthly signal (mamonthly1): MA state judged every month start, independent of
+    # the Q/Y/M/N calendar, from the PREVIOUS month-end close (no look-ahead). Non-calendar
+    # flips = sleeve-only update (risky ↔ cash), core drift kept. 'rebal' = legacy.
+    ma_w = {"133690": 60, "069500": 20, "148070": 20}
+    ma_cash = "153130"
+    if all(c in prices for c in ma_w) and ma_cash in prices and "069500" in prices:
+        ma_start = "1990-01-01"
+        ma_kw = dict(ma_overlay=True, cash_code=ma_cash, ma_cash_pct=1.0)
+        mm = {m: backtest(ma_w, prices, start=ma_start, rebalance=m, **ma_kw) for m in ("N", "Y", "Q", "M")}
+        # (a) MA alone with N: sleeve updates after day 0 (signal flips happen), no full rebalances
+        if not (mm["N"].rebal_count == 0 and mm["N"].sleeve_update_count > 0 and mm["N"].ma_switch_count > 0):
+            fail(
+                f"mamonthly N: rebal={mm['N'].rebal_count} sleeve={mm['N'].sleeve_update_count} "
+                f"switch={mm['N'].ma_switch_count} (MA must flip monthly without full rebalance)"
+            )
+        # MA alone: a sleeve update happens exactly on each flip (only switched amount trades)
+        if mm["N"].sleeve_update_count != mm["N"].ma_switch_count:
+            fail(f"mamonthly N: sleeve_update_count {mm['N'].sleeve_update_count} != ma_switch_count {mm['N'].ma_switch_count}")
+        # (b) Y vs Q differ
+        if abs(mm["Y"].final_value - mm["Q"].final_value) <= 1e-9 * abs(mm["Q"].final_value):
+            fail("mamonthly: MA Y == Q")
+        # (c) switching count / signal dates independent of calendar
+        sw = {m: mm[m].ma_switch_count for m in mm}
+        if len(set(sw.values())) != 1:
+            fail(f"mamonthly: ma_switch_count depends on calendar {sw}")
+        sig = {m: [(e["date"], e["regime"], e["signal_date"]) for e in (mm[m].regime_log or [])] for m in mm}
+        if sig["Y"] != sig["Q"] or sig["N"] != sig["Q"]:
+            fail("mamonthly: month-start MA signal log differs between N/Y/Q")
+        # (d) No look-ahead: signal close = last benchmark close strictly before the month
+        bench = prices["069500"]
+        bdates = sorted(bench)
+        import bisect
+        for e in mm["Q"].regime_log or []:
+            m0 = e["date"][:7] + "-01"
+            sd = e["signal_date"]
+            if sd is None or not (sd < m0):
+                fail(f"mamonthly look-ahead: {e['date']} uses close {sd} (must be < {m0})")
+                break
+            i = bisect.bisect_left(bdates, m0)
+            if i == 0 or bdates[i - 1] != sd:
+                fail(f"mamonthly: {e['date']} signal close {sd} is not previous month-end close")
+                break
+            hist = bdates[max(0, i - 200):i]
+            if len(hist) == 200:
+                sma = sum(bench[x] for x in hist) / 200.0
+                exp = "on" if bench[sd] >= sma else "off"
+                if exp != e["regime"]:
+                    fail(f"mamonthly: {e['date']} regime {e['regime']} != recomputed {exp}")
+                    break
+        # Perturbation: scrambling benchmark closes from month start on must not change that month's signal
+        qlog = mm["Q"].regime_log or []
+        probes = [qlog[k] for k in range(len(qlog) // 7, len(qlog), max(1, len(qlog) // 6))][:5]
+        for e in probes:
+            m0 = e["date"][:7] + "-01"
+            p2 = dict(prices)
+            p2["069500"] = {d: (v * (0.01 if bench_i % 2 else 100.0) if d >= m0 else v)
+                            for bench_i, (d, v) in enumerate(sorted(bench.items()))}
+            r2 = backtest(ma_w, p2, start=ma_start, end=e["date"], rebalance="Q", **ma_kw)
+            last = (r2.regime_log or [])[-1]
+            if last["date"] != e["date"] or last["regime"] != e["regime"]:
+                fail(f"mamonthly look-ahead: future-scrambled benchmark changed {e['date']} signal")
+                break
+        # (e) Cost: only switched amount pays. ma_cash_pct=1, no 153130 in base → every flip is
+        # a full risky↔cash swap (TO=1): drag_i = V_post × r/(1−r); non-flip months cost 0.
+        rate = mm["N"].trade_cost
+        by_d = {d: v for d, v, _r in mm["N"].curve}
+        flips = []
+        prev_reg = None
+        for e in mm["N"].regime_log or []:
+            if prev_reg is not None and e["regime"] != prev_reg:
+                flips.append(e["date"])
+            prev_reg = e["regime"]
+        exp_drag = sum(by_d[d] * rate / (1.0 - rate) for d in flips)
+        if abs(exp_drag - mm["N"].total_cost_drag) > 1e-9 * max(1.0, exp_drag):
+            fail(f"mamonthly cost: drag {mm['N'].total_cost_drag} != switched-amount only {exp_drag}")
+        # (f) N: while risk-on between flips the core keeps buy-and-hold relative drift
+        # (checked via GOLDON+MA below) and 'rebal' reproduces legacy (MA only on rebalance dates)
+        leg = {m: backtest(ma_w, prices, start=ma_start, rebalance=m, ma_signal_freq="rebal", **ma_kw) for m in ("N", "Y")}
+        if leg["N"].sleeve_update_count != 0 or len(leg["N"].regime_log or []) != 1:
+            fail("mamonthly rebal-mode: N must evaluate MA only on day 0 (legacy)")
+        if len(leg["Y"].regime_log or []) != leg["Y"].rebal_count + 1 or leg["Y"].sleeve_update_count != 0:
+            fail("mamonthly rebal-mode: Y must evaluate MA only on rebalance dates (legacy)")
+        # (g) GOLDON+MA: no double count / overwrite of the 153130 weight. MA first (risky→cash),
+        # GOLDON last (sleeve → gold or 153130). Off month: 153130 = (1−s) + s·[gold off].
+        g_code = GOLD_CODE_FUTURES if GOLD_CODE_FUTURES in prices else GOLD_CODE
+        if g_code in prices and GOLD_CASH == ma_cash:
+            gm = backtest(ma_w, prices, start=ma_start, rebalance="N", gold_on=True,
+                          gold_sleeve_pct=0.15, gold_code=g_code, **ma_kw)
+            reg_by_d = {e["date"]: e["regime"] for e in gm.regime_log or []}
+            s_ = 0.15
+            for e in gm.gold_log or []:
+                w = e["weights"]
+                if abs(sum(w.values()) - 1.0) > 1e-9:
+                    fail(f"GOLDON+MA weights sum {sum(w.values())} on {e['date']}")
+                    break
+                reg = reg_by_d.get(e["date"])
+                exp_cash = ((1.0 - s_) if reg == "off" else 0.0) + (0.0 if e["on"] else s_)
+                exp_gold = s_ if e["on"] else 0.0
+                if abs(w.get(ma_cash, 0.0) - exp_cash) > 1e-9 or abs(w.get(g_code, 0.0) - exp_gold) > 1e-9:
+                    fail(f"GOLDON+MA cash/gold weight wrong on {e['date']}: {w} (regime {reg}, gold {e['on']})")
+                    break
+            if gm.ma_switch_count != mm["N"].ma_switch_count:
+                fail("GOLDON+MA: MA switch count must match MA alone")
+        print(
+            f"mamonthly ok: MA N sleeve={mm['N'].sleeve_update_count} switch={sw['N']} (N/Y/Q/M equal) · "
+            f"Y≠Q · signal close < month (no look-ahead) · switched-amount cost · rebal-mode legacy · GOLDON+MA cash ok"
+        )
+    else:
+        fail("mamonthly: 133690/069500/148070/153130 prices required")
+
     app_js_chk = (ROOT / "app.js").read_text(encoding="utf-8")
     for needle in (
         "MOM12_1", "XSMOM", "volTarget", "sleeveTrend", "momentumPick12_1", "xsMomentumPick",
         "applyMonthlyOverlays", "coreDriftWeights", "coreAddCash", "sleeveUpdateCount", "dcaBuyCount",
+        "maSignalFreq", "evalMaMonth", "maMonthAsof", "maSwitchCount",
     ):
         if needle not in app_js_chk:
             fail(f"JS parity needle missing: {needle}")
@@ -1040,6 +1151,8 @@ def main():
         fail("new rebalance modes missing from index.html")
     if 'id="volTarget"' not in idx_chk or 'id="sleeveTrend"' not in idx_chk:
         fail("volTarget/sleeveTrend toggles missing from index.html")
+    if 'id="maSignalFreq"' not in idx_chk or "MA 신호는 리밸 주기와 별도로 매월 판단" not in idx_chk:
+        fail("MA signal-frequency option / monthly note missing from index.html")
 
     # Price-return disclosure (no invented TR): UI must state price-return basis
     idx = (ROOT / "index.html").read_text(encoding="utf-8")
