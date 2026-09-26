@@ -63,6 +63,8 @@ DIV_GOLDEN = [
     {"id": "G5-band-reinvest-DCA", "weights": {"SCHD": 40, "BND": 30, "446720": 30}, "rebalance": "Q",
      "start": "2020-01-01", "end": "2099-12-31", "initial": 5_000_000.0, "monthly": 300_000.0,
      "opts": {"mode": "reinvest", "bandOn": True, "bandPct": 0.03, "cost": 0.002}},
+    {"id": "G6-BIL+161510-unknown-year", "weights": {"BIL": 50, "161510": 50}, "rebalance": "N",
+     "start": "2012-01-01", "end": "2016-12-31", "initial": 100_000_000.0, "monthly": 0.0, "opts": {"mode": "cash"}},
 ]
 
 
@@ -128,13 +130,13 @@ def _div_compare(cid, p: dict, j: dict, fails: list):
     if len(pd_["months"]) != len(jd["months"]):
         fails.append(f"{cid}: months len {len(pd_['months'])} vs {len(jd['months'])}")
     for a, b in zip(pd_["months"], jd["months"]):
-        for k in ("ym", "gross", "tax", "net", "count", "status"):
+        for k in ("ym", "gross", "tax", "net", "count", "status", "known"):
             if not _close(a[k], b[k]):
                 fails.append(f"{cid}.month {a['ym']}.{k}: py={a[k]} js={b[k]}")
         if bool(a.get("inc")) != bool(b.get("inc")):
             fails.append(f"{cid}.month {a['ym']}.inc")
     for a, b in zip(pd_["years"], jd["years"]):
-        for k in ("y", "gross", "tax", "net", "count", "partial", "status", "fxBar", "growthKrwPct", "growthUsdPct", "fxEffectPct"):
+        for k in ("y", "gross", "tax", "net", "count", "partial", "status", "known", "fxBar", "growthKrwPct", "growthUsdPct", "fxEffectPct"):
             if not _close(a.get(k), b.get(k)):
                 fails.append(f"{cid}.year {a['y']}.{k}: py={a.get(k)} js={b.get(k)}")
     for k in ("from", "to", "gross", "tax", "net", "count", "short", "monthlyAvg", "label"):

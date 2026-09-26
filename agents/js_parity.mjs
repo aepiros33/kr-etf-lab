@@ -52,6 +52,22 @@ for (const c of job.dividend || []) {
   delete r.dividends.events;
   out.dividend.push(r);
 }
+// dividend share-hash round trip: encode(state) → decode(hash)
+if (job.divShare) {
+  out.divShare = job.divShare.map((st) => {
+    const h = ctx.divEncodeHash(st);
+    return { hash: h, back: ctx.divDecodeHash("#" + h) };
+  });
+}
+if (job.divLegacy) out.divLegacy = job.divLegacy.map((h) => ctx.divDecodeHash(h));
+// dividend CSV text for given cases (same builder the UI download uses)
+if (job.divCsv) {
+  out.divCsv = job.divCsv.map((c) => {
+    const r = ctx.backtestDividend(c.weights, job.divData, c.start, c.end, c.rebalance, c.initial, c.monthly, c.opts || {});
+    if (r.error) return { error: r.error };
+    return { csv: ctx.divBuildCsv({ compare: false, r, ctl: { period: "custom" } }, { etfs: job.divEtfs || [], generated: "test" }) };
+  });
+}
 if (job.presetWeights) out.presetWeights = Object.fromEntries(Object.entries(ctx.__x.PRESETS).map(([k, p]) => [k, p.w || {}]));
 if (job.presets) out.presets = { PRESETS: Object.keys(ctx.__x.PRESETS), DIV_PRESETS: ctx.__x.DIV_PRESETS };
 process.stdout.write(JSON.stringify(out));

@@ -642,3 +642,5 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
   .div-kpis .val { font-size: 16px; }
   .mode-btn { font-size: 13px; padding: 9px 10px; }
 }
+.div-table tr.div-unknown td { color: var(--muted, #8b9aab); }
+#divCustomRow[hidden] { display: none; }

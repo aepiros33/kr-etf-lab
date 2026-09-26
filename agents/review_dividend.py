@@ -19,7 +19,7 @@ DATA = ROOT / "data"
 sys.path.insert(0, str(HERE))
 import build_backtest as bb  # noqa: E402
 
-BANNED = ["월급", "받는다", "받을 수 있", "추천", "순위", "최고"]
+BANNED = ["월급", "받는다", "받는", "받을 수 있", "추천", "순위", "최고"]
 REQUIRED_LABELS = ["배당락일 기준 집계", "월평균 = TTM÷12", "일반계좌 가정", "과거 기준", "2,000만원", "250만원", "22%",
                    "15.4%", "2025.1", "데이터 없음", "미확인", "커버드콜", "2023-08"]
 NEW_NOTICE = "수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬"
@@ -276,6 +276,15 @@ def check_engine(fail, warns):
     st = {m["ym"]: m["status"] for m in r["dividends"]["months"]}
     if st.get("2016-03") != "unverified":
         fail("DGRO 2016-03 gap must be 'unverified'")
+    # 5) unknown year (only 데이터 없음/미확인 months, no event) → known=False (UI/CSV show —, not 0); confirmed year → known
+    d2 = bb.load_dividend_data(["BIL", "161510"])
+    r = bb.backtest_dividend({"BIL": 50, "161510": 50}, d2, "2012-01-01", "2016-12-31", "N", 1e8, 0.0, {"mode": "cash"})
+    yk = {y["y"]: y["known"] for y in r["dividends"]["years"]}
+    if yk.get("2012") is not False or yk.get("2013") is not True:
+        fail(f"yearly known flags wrong (2012 must be unknown, 2013 known): {yk}")
+    r = bb.backtest_dividend({"SCHD": 1}, data, "2016-01-01", "2099-12-31", "N", 1.0, 0.0, {"mode": "cash"})
+    if not all(y["known"] for y in r["dividends"]["years"]) or not all(m["known"] for m in r["dividends"]["months"] if m["status"] == "ok"):
+        fail("confirmed months/years must be known (true 0 stays 0)")
     return diff
 
 
@@ -294,8 +303,78 @@ def check_wording(fail):
     for lab in REQUIRED_LABELS:
         if lab not in div_js and lab not in div_html:
             fail(f"required dividend label missing: 「{lab}」")
-    if "?v=div1" not in idx:
-        fail("cache-bust ?v=div1 missing")
+    if "?v=div2" not in idx or "?v=div1" in idx:
+        fail("cache-bust ?v=div2 missing (or stale ?v=div1 left)")
+    for need in ('id="btnDivCsv"', 'id="btnDivShare"', "divBuildCsv", "divEncodeHash", "divDecodeHash"):
+        if need not in div_js:
+            fail(f"dividend share/CSV UI missing: {need}")
+
+
+SHARE_CASES = [
+    {"preset": "divSample", "sel": {"SCHD": 35, "VIG": 20, "BND": 25, "161510": 20}, "mode": "reinvest", "taxView": "pre",
+     "period": "max", "start": "", "end": "", "rebalance": "Y", "bandOn": False, "bandPct": 5, "initial": 100000000,
+     "monthly": 0, "tcBps": 10},
+    {"preset": None, "sel": {"SCHD": 60, "446720": 40}, "mode": "cash", "taxView": "after", "period": "custom",
+     "start": "2016-01-01", "end": "2024-12-31", "rebalance": "Q", "bandOn": True, "bandPct": 3, "initial": 50000000,
+     "monthly": 300000, "tcBps": 25},
+    {"preset": "schdVsKr", "sel": {"SCHD": 100}, "mode": "reinvest", "taxView": "after", "period": "3y", "start": "",
+     "end": "", "rebalance": "N", "bandOn": False, "bandPct": 5, "initial": 100000000, "monthly": 0, "tcBps": 0},
+    {"preset": "divSample", "sel": {"SCHD": 50, "BND": 50}, "mode": "cash", "taxView": "pre", "period": "10y",
+     "start": "", "end": "", "rebalance": "M", "bandOn": False, "bandPct": 5, "initial": 100000000, "monthly": 0, "tcBps": 10},
+]
+
+
+def check_share_csv(fail):
+    """Dividend share hash round-trips every toggle; CSV has BOM/header/monthly+yearly and never writes 0 for unknown."""
+    import parity_check as pc
+    data = bb.load_dividend_data(["BIL", "161510", "SCHD"])
+    jd = {"meta": data["meta"], "prices": data["prices"], "basis": data["basis"], "div": data["div"],
+          "fx": [list(x) for x in data["fx"]]}
+    etfs = _load_json(DATA / "div_meta.json")["etfs"]
+    out = pc.run_node({"divShare": SHARE_CASES, "divLegacy": ["#div", "#div=divSample"], "divData": jd, "divEtfs": etfs,
+                       "divCsv": [{"weights": {"BIL": 50, "161510": 50}, "start": "2012-01-01", "end": "2016-12-31",
+                                   "rebalance": "N", "initial": 1e8, "monthly": 0, "opts": {"mode": "cash"}}]})
+    for st, res in zip(SHARE_CASES, out["divShare"]):
+        back = res["back"]
+        for k, v in st.items():
+            if k == "bandPct" and not st["bandOn"]:
+                continue
+            if back.get(k) != v:
+                fail(f"dividend share round-trip: {k} {v!r} → {back.get(k)!r} (hash {res['hash']})")
+        from urllib.parse import parse_qs
+        keys = set(parse_qs(res["hash"]))
+        if keys & {"v", "h", "preset"}:
+            fail("dividend share hash must not use price-mode keys v/h/preset (would hijack price boot)")
+    lg = out["divLegacy"]
+    if not (lg[0] and lg[0]["legacy"] and lg[0]["preset"] is None and lg[1]["legacy"] and lg[1]["preset"] == "divSample"):
+        fail(f"legacy #div / #div=divSample links must still open dividend mode: {lg}")
+    csv_text = out["divCsv"][0].get("csv", "")
+    if not csv_text.startswith("\ufeff"):
+        fail("dividend CSV must start with UTF-8 BOM")
+    lines = csv_text.lstrip("\ufeff").splitlines()
+    for need in ("meta,returnBasis,", "meta,taxAssumption,", "meta,statusLegend,"):
+        if not any(l.startswith(need) for l in lines):
+            fail(f"dividend CSV header line missing: {need}")
+    rows = list(csv.reader(lines))
+    mhead = next((r for r in rows if r[:2] == ["section", "month"]), None)
+    yhead = next((r for r in rows if r[:2] == ["section", "year"]), None)
+    if not mhead or not yhead:
+        fail("dividend CSV needs monthly + yearly sections")
+    for need in ("BIL_gross", "BIL_tax", "BIL_net", "BIL_fx", "161510_gross", "total_gross", "total_tax", "total_net", "fx_usdkrw", "status"):
+        if need not in mhead:
+            fail(f"dividend CSV monthly column missing: {need}")
+    mrows = {r[1]: dict(zip(mhead, r)) for r in rows if r and r[0] == "monthly"}
+    yrows = {r[1]: dict(zip(yhead, r)) for r in rows if r and r[0] == "yearly"}
+    m = mrows.get("2012-09", {})
+    if m.get("161510_gross") != "데이터 없음" or m.get("BIL_gross") != "미확인" or m.get("total_gross") in ("0", "", None):
+        fail(f"dividend CSV unknown month must be text, not 0: {m}")
+    y = yrows.get("2012", {})
+    if y.get("total_gross") in ("0", "0.0", "", None) or "데이터 없음" not in y.get("total_gross", ""):
+        fail(f"dividend CSV/yearly 2012 (only 데이터 없음·미확인 months) must not be 0: {y}")
+    try:
+        float(yrows["2014"]["total_gross"])
+    except (KeyError, ValueError):
+        fail("dividend CSV known year must be numeric")
 
 
 def run(fail):
@@ -305,6 +384,7 @@ def run(fail):
     check_separation(fail, etfs)
     diff = check_engine(fail, warns)
     check_wording(fail)
+    check_share_csv(fail)
     # golden byte-identical (dividend-off engines)
     import golden_price_mode as g
     gold = json.loads(g.GOLDEN.read_text())

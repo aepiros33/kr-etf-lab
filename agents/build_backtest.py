@@ -2036,6 +2036,8 @@ def backtest_dividend(
         inc = (ym == months[0] and day0 > first_wd) or (ym == months[-1] and last_d < last_wd)
         if inc:
             m["inc"] = True
+        # amount known = at least one recorded event, or every holding confirmed for this month (true 0)
+        m["known"] = m["count"] > 0 or st == "ok"
     month_list = [mrow[ym] for ym in months]
 
     years = []
@@ -2060,6 +2062,8 @@ def backtest_dividend(
             yr["status"] = "partial"
         elif "unverified" in sts:
             yr["status"] = "unverified"
+        # unknown year (no event, only 데이터 없음/미확인 months) → amounts are not 0 but unknown
+        yr["known"] = yr["count"] > 0 or yr["status"] == "ok"
         if any_us:
             yr["usdGross"] = usd_native
             yr["usdKrwGross"] = usd_krw
