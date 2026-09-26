@@ -139,8 +139,10 @@ def check_data(fail, warns):
             if m["market"] == "KR":
                 if not str(e.get("src", "")).startswith("kind:"):
                     fail(f"{code}: KR event without KIND filing {e}")
-                k = bisect.bisect_left(dates, e["rec"]) - 1
-                if k < 0 or dates[k] != e["ex"]:
+                import div_ingest
+                kc = div_ingest.krx_calendar()
+                k = bisect.bisect_left(kc, e["rec"]) - 1
+                if k < 0 or kc[k] != e["ex"]:
                     fail(f"{code}: ex {e['ex']} ≠ trading day before record {e['rec']}")
             if e.get("v"):
                 nverified += 1

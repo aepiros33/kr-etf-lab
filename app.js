@@ -5342,11 +5342,20 @@ async function divRun() {
       // common window across ALL legs (same dates for a fair side-by-side)
       const firsts = codes.map((c) => divEtf(c).start).sort();
       const win = divWindow(codes, ctl, [p.start || "", firsts[firsts.length - 1]].sort()[1]);
-      const legs = p.compare.map((l) => ({
-        label: l.label,
-        w: l.w,
-        r: backtestDividend(l.w, divState.data, win.start, win.end, ctl.rebalance, ctl.initial, ctl.monthly, opts),
-      }));
+      const runLegs = (s0, e0) =>
+        p.compare.map((l) => ({
+          label: l.label,
+          w: l.w,
+          r: backtestDividend(l.w, divState.data, s0, e0, ctl.rebalance, ctl.initial, ctl.monthly, opts),
+        }));
+      let legs = runLegs(win.start, win.end);
+      // align every leg to the same first/last date (KR/US holidays and data gaps differ)
+      const okL = legs.filter((l) => !l.r.error);
+      if (okL.length) {
+        const s1 = okL.map((l) => l.r.start).sort().at(-1);
+        const e1 = okL.map((l) => l.r.end).sort()[0];
+        if (okL.some((l) => l.r.start !== s1 || l.r.end !== e1)) legs = runLegs(s1, e1);
+      }
       divState.last = { compare: true, legs, preset: p, ctl };
       divRenderCompare(host, legs, p, ctl);
       return;

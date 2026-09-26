@@ -297,6 +297,18 @@ def _gap_ranges(gaps: set[str]) -> list[dict]:
     return out
 
 
+_KRX_CAL = None
+
+
+def krx_calendar() -> list[str]:
+    """KRX trading days = union of dates of every series in data/etf_prices.json (FDR/KRX)."""
+    global _KRX_CAL
+    if _KRX_CAL is None:
+        b = json.loads((DATA / "etf_prices.json").read_text(encoding="utf-8"))
+        _KRX_CAL = sorted({r["d"] for rows in b["prices"].values() for r in rows})
+    return _KRX_CAL
+
+
 def build_kr(code, name, cat, cc, cov_override, note, idx):
     print("KR", code, name)
     h = _yf_hist(f"{code}.KS")
@@ -307,11 +319,12 @@ def build_kr(code, name, cat, cc, cov_override, note, idx):
     yahoo = {str(d.date()): float(v) for d, v in h["Dividends"].items() if v and v > 0}
     out = []
     import bisect
+    cal = krx_calendar()  # Yahoo .KS raw misses ~1–2% of KRX days → ex-date from the KRX calendar
     for e in ev:
-        i = bisect.bisect_left(dates, e["rec"]) - 1
-        if i < 0:
+        i = bisect.bisect_left(cal, e["rec"]) - 1
+        if i < 0 or cal[i] < first:
             continue
-        ex = dates[i]
+        ex = cal[i]
         o = {"ex": ex, "rec": e["rec"], "pay": e["pay"], "amt": e["amt"], "src": f"kind:{e['acpt']}", "kindName": e["name"]}
         if ex in yahoo:
             o["chk"] = {"yahoo": yahoo[ex]}
@@ -327,7 +340,7 @@ def build_kr(code, name, cat, cc, cov_override, note, idx):
          "coverage": {"from": cov_from, "to": last}, "gaps": [],
          "gapPolicy": "KIND 월별 전수 검색 기준: 공시 없는 달 = 무분배(국내 고배당 ETF는 연1회·분기·월 전환 등 일정이 불규칙해 일정 기반 미확인 추정은 하지 않음). Yahoo에만 있는 이벤트는 yahooOnly에 기록(리뷰 FAIL)",
          "yahooOnly": yahoo_only,
-         "sources": ["kind"], "exDateRule": "기준일 직전 KRX 거래일(T+2 결제)", "events": out}
+         "sources": ["kind"], "exDateRule": "기준일 직전 KRX 거래일(T+2 결제, KRX 달력 = etf_prices.json 날짜 합집합)", "events": out}
     if note:
         d["note"] = note
     meta = {"code": code, "name": name, "market": "KR", "currency": "KRW", "group": "국내상장 배당", "category": cat,
