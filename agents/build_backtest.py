@@ -1818,6 +1818,11 @@ def _div_edge_weekday(ym: str, last: bool) -> str:
     return d.isoformat()
 
 
+def _div_shift_ym(ym: str, k: int) -> str:
+    n = int(ym[:4]) * 12 + int(ym[5:7]) - 1 + k
+    return f"{n // 12:04d}-{n % 12 + 1:02d}"
+
+
 def _div_in_ranges(ym: str, ranges: list[dict]) -> bool:
     return any(g["from"] <= ym <= g["to"] for g in ranges or [])
 
@@ -2067,13 +2072,16 @@ def backtest_dividend(
         years.append(yr)
         prev_y = yr
 
-    cutoff = _div_minus_days(last_d, 365)
-    tt = [r for r in events_log if cutoff < r["ex"] <= last_d]
-    ttm_months = [ym for ym in months if ym >= cutoff[:7]]
+    # TTM = last 12 COMPLETE calendar months by ex-date month (an incomplete final month is
+    # excluded) — avoids counting the same quarter twice when ex-dates drift by a few days.
+    end_m = months[-1] if not mrow[months[-1]].get("inc") else _div_shift_ym(months[-1], -1)
+    start_m = _div_shift_ym(end_m, -11)
+    ttm_months = [ym for ym in months if start_m <= ym <= end_m]
+    tt = [r for r in events_log if start_m <= r["ex"][:7] <= end_m]
     ttm = {
-        "from": cutoff, "to": last_d,
+        "from": start_m, "to": end_m,
         "gross": sum(r["gross"] for r in tt), "tax": sum(r["tax"] for r in tt), "net": sum(r["net"] for r in tt),
-        "count": len(tt), "short": day0 > cutoff,
+        "count": len(tt), "short": months[0] > start_m or (months[0] == start_m and bool(mrow[start_m].get("inc"))),
         "flags": sorted({mrow[ym]["status"] for ym in ttm_months} - {"ok"}),
         "label": "월평균 = TTM÷12",
     }

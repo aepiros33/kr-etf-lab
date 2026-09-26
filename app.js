@@ -4800,6 +4800,11 @@ function divEdgeWeekday(ym, last) {
   return new Date(t).toISOString().slice(0, 10);
 }
 
+function divShiftYm(ym, k) {
+  const n = Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1 + k;
+  return `${String(Math.floor(n / 12)).padStart(4, "0")}-${String((n % 12) + 1).padStart(2, "0")}`;
+}
+
 function divInRanges(ym, ranges) {
   return (ranges || []).some((g) => g.from <= ym && ym <= g.to);
 }
@@ -5041,17 +5046,20 @@ function backtestDividend(weights, data, start, end, rebalance, initialCapital =
     prevY = yr;
   }
 
-  const cutoff = divMinusDays(lastD, 365);
-  const tt = eventsLog.filter((r) => cutoff < r.ex && r.ex <= lastD);
-  const ttmMonths = months.filter((ym) => ym >= cutoff.slice(0, 7));
+  // TTM = last 12 COMPLETE calendar months by ex-date month (incomplete final month excluded)
+  const lastM = months[months.length - 1];
+  const endM = mrow[lastM].inc ? divShiftYm(lastM, -1) : lastM;
+  const startM = divShiftYm(endM, -11);
+  const ttmMonths = months.filter((ym) => startM <= ym && ym <= endM);
+  const tt = eventsLog.filter((r) => startM <= r.ex.slice(0, 7) && r.ex.slice(0, 7) <= endM);
   const ttm = {
-    from: cutoff,
-    to: lastD,
+    from: startM,
+    to: endM,
     gross: tt.reduce((s, r) => s + r.gross, 0),
     tax: tt.reduce((s, r) => s + r.tax, 0),
     net: tt.reduce((s, r) => s + r.net, 0),
     count: tt.length,
-    short: day0 > cutoff,
+    short: months[0] > startM || (months[0] === startM && !!mrow[startM].inc),
     flags: [...new Set(ttmMonths.map((ym) => mrow[ym].status))].filter((s) => s !== "ok").sort(),
     label: "월평균 = TTM÷12",
   };
@@ -5559,7 +5567,7 @@ function divKpis(r, view) {
     `TTM 월평균(${tag})`,
     won(avg),
     `월평균 = TTM÷12 · 과거 기준 월 ${won(avg)} 수준이었다${ttmFlag}`
-  )}${k(`TTM 합계(${tag})`, won(tot), `${divMinusDays(t.to, 364)} ~ ${t.to} · 배당락 ${t.count}건`)}${k(
+  )}${k(`TTM 합계(${tag})`, won(tot), `최근 완결 12개월 ${t.from}~${t.to}(배당락월 기준) · ${t.count}건`)}${k(
     "누적 분배금(세후)",
     won(r.dividends.totalNet),
     `세전 ${won(r.dividends.totalGross)} · 세금 ${won(r.dividends.totalTax)}`
