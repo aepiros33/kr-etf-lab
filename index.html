@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="./styles.css?v=div2" />
+  <link rel="stylesheet" href="./styles.css?v=div3" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -47,6 +47,10 @@
             <option value="DMOM">듀얼 모멘텀</option>
             <option value="N">리밸런싱 없음</option>
           </select>
+        </div>
+        <div class="row" id="customDates" style="display:none">
+          <input type="date" id="startDate" />
+          <input type="date" id="endDate" />
         </div>
         <p class="muted-note" id="rebalRuleNote">분기·연 1회·매월은 해당 날짜에만 전체 보유를 목표 비중으로 재조정했습니다. 월 적립은 목표 비중으로 추가 매수만, 금/국면헤지/변동성 타깃/슬리브 추세의 월간 갱신은 오버레이 슬리브만 조정(기존 보유 간 비율 유지) · 과거 시뮬.</p>
         <div class="row mom-row" id="momControls" style="display:none">
@@ -222,11 +226,6 @@
           </label>
         </div>
         <p class="muted-note">전월 말 금 절대모멘텀이 단기채보다 높을 때만 금 슬리브 유지 · 월초엔 슬리브만 갱신(나머지 보유 비율 유지) · 선물(H)≠현물 · 환헤지·롤 비용은 기존 전환비용 외 미모형 · 과거 시뮬 · 투자 권유 아님</p>
-        <div class="row" id="customDates" style="display:none">
-          <input type="date" id="startDate" />
-          <input type="date" id="endDate" />
-        </div>
-
         <div class="section-title">월 적립 (DCA)</div>
         <label class="toggle">
           <input type="checkbox" id="dcaOn" />
@@ -391,6 +390,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=div2"></script>
+  <script src="./app.js?v=div3"></script>
 </body>
 </html>
