@@ -4,7 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
-  <link rel="stylesheet" href="./styles.css?v=mobilefix1" />
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="./styles.css?v=div1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -14,11 +15,15 @@
       <div>
         <div class="eyebrow">KR ETF Lab · Agent build</div>
         <h1>한국에서 사는 ETF로 포트 짜고 과거 수익률 보기</h1>
-        <p class="sub">KRX 상장 ETF만 넣었습니다. 검색·카테고리로 고르고, 비중과 월 적립을 정하면 공통 상장 기간의 가격 수익률을 계산합니다.</p>
+        <p class="sub">KRX 상장 ETF 중심입니다. 검색·카테고리로 고르고, 비중과 월 적립을 정하면 공통 상장 기간의 수익률을 계산합니다(수정주가 기준 · 분배금 세전 재투자 효과 포함 · 세금 미반영 · 과거 시뮬). 「배당 현금흐름」 탭은 원가격 + 실제 분배금으로 월별 분배금 흐름을 따로 봅니다.</p>
       </div>
       <div class="stamp" id="stamp"></div>
     </header>
-    <div class="layout">
+    <nav class="mode-switch" id="modeSwitch" role="tablist" aria-label="시뮬 모드">
+      <button type="button" class="mode-btn active" id="modePrice" role="tab" aria-selected="true">가격 시뮬 <span class="mode-sub">수정주가</span></button>
+      <button type="button" class="mode-btn" id="modeDiv" role="tab" aria-selected="false">배당 현금흐름 <span class="mode-sub">원가격 + 실제 분배금</span></button>
+    </nav>
+    <div class="layout" id="priceLayout">
       <aside class="card pad sidebar">
         <div class="section-title">프리셋</div>
         <div class="presets" id="presets"></div>
@@ -238,21 +243,14 @@
 
         <div class="section-title">분배금 · 총수익</div>
         <div id="priceReturnDisclosure" class="price-return-box">
-          <strong>이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.</strong>
-          <p class="muted-note" style="margin:6px 0 0">실제 분배금·TR 시계열이 데이터에 없으면 합성 TR을 만들지 않습니다. TR 플래그가 메타에 생기면 아래에서 토글할 수 있습니다.</p>
-        </div>
-        <div id="trSection" style="display:none">
-          <label class="toggle">
-            <input type="checkbox" id="trOn" />
-            <span>분배금 재투자 (Total Return)</span>
-          </label>
-          <p class="muted-note">실제 TR/분배 시계열이 있을 때만 사용합니다. 세금은 별도 모형입니다.</p>
+          <strong>수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬</strong>
+          <p class="muted-note" style="margin:6px 0 0">국내 시세(FinanceDataReader/네이버·Yahoo auto_adjust)는 분배락을 되돌린 수정주가라, 분배금을 세전으로 재투자한 효과가 이미 들어 있습니다. 그래서 별도 「TR(분배금 재투자)」 가산은 이중 계산이 되어 제공하지 않습니다. 실제 분배금(세후)의 월별 흐름은 상단 「배당 현금흐름」 탭에서 원가격 + 실제 분배 이벤트로 계산합니다.</p>
         </div>
 
         <div class="section-title">계좌 · 세금 모형 (단순화)</div>
         <label class="toggle">
           <input type="radio" name="accountType" id="acctTaxable" value="taxable" checked />
-          <span>일반 계좌 (배당·양도 모형 15.4%)</span>
+          <span>일반 계좌 (추정 분배금 15.4% · 매매차익 국내주식형 비과세/그 외 15.4%)</span>
         </label>
         <label class="toggle">
           <input type="radio" name="accountType" id="acctPension" value="pension" />
@@ -321,11 +319,71 @@
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
     </div>
+    <div class="layout div-layout" id="divLayout" hidden>
+      <aside class="card pad sidebar" id="divSidebar">
+        <div class="section-title">배당 현금흐름 · 프리셋 (예시)</div>
+        <div class="presets" id="divPresets"></div>
+        <p class="muted-note">원가격(분할만 조정) + 실제 분배 이벤트로 계산합니다. 수정주가와 분배금을 함께 쓰지 않습니다(이중 계산 방지). 프리셋은 예시 조합일 뿐 권유가 아닙니다 · 과거 시뮬 · 투자 자문 아님.</p>
+        <div class="row">
+          <select id="divPeriod" aria-label="기간">
+            <option value="max" selected>가능한 최장(공통 기간)</option>
+            <option value="10y">10년</option>
+            <option value="5y">5년</option>
+            <option value="3y">3년</option>
+            <option value="1y">1년</option>
+            <option value="custom">직접 지정</option>
+          </select>
+          <select id="divRebalance" aria-label="리밸런싱">
+            <option value="Q">분기 리밸런싱</option>
+            <option value="Y">연 1회</option>
+            <option value="M">매월 고정</option>
+            <option value="N" selected>리밸런싱 없음</option>
+          </select>
+        </div>
+        <div class="row" id="divCustomRow" hidden>
+          <label class="field">시작일<input type="date" id="divStart" /></label>
+          <label class="field">종료일<input type="date" id="divEnd" /></label>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="divBandOn" />
+          <span>밴드 리밸런싱(목표 비중 ±<input type="number" id="divBandPct" min="1" max="10" step="1" value="5" class="inline-num" />%p 이탈 시)</span>
+        </label>
+        <p class="muted-note">배당 모드는 고정 비중(분기·연·매월·없음)+밴드+월 적립만 지원합니다. 모멘텀·이동평균·국면 헤지·금 슬리브·변동성 타깃·역변동성은 비활성(원가격은 배당락 하락이 있어 신호가 왜곡됨).</p>
+
+        <div class="section-title">금액</div>
+        <div class="row">
+          <label class="field">시작 원금(원)<input type="number" id="divInitial" min="10000" step="1000000" value="100000000" /></label>
+          <label class="field">매월 적립(원)<input type="number" id="divMonthly" min="0" step="100000" value="0" /></label>
+        </div>
+
+        <div class="section-title">분배금 처리 · 표시</div>
+        <div class="seg" role="radiogroup" aria-label="분배금 처리">
+          <label class="seg-opt"><input type="radio" name="divMode" value="cash" checked /><span>인출(현금으로 빼기)</span></label>
+          <label class="seg-opt"><input type="radio" name="divMode" value="reinvest" /><span>같은 종목 재투자</span></label>
+        </div>
+        <div class="seg" role="radiogroup" aria-label="막대 기준">
+          <label class="seg-opt"><input type="radio" name="divTaxView" value="after" checked /><span>세후 막대</span></label>
+          <label class="seg-opt"><input type="radio" name="divTaxView" value="pre" /><span>세전 막대</span></label>
+        </div>
+        <p class="muted-note">일반계좌 가정: 미국 직투 분배금 15%(미국 원천), 국내상장 ETF 분배금 15.4%. ISA·연금계좌 미반영.</p>
+
+        <div class="section-title">종목 (분배 데이터 보유분만)</div>
+        <div class="cats" id="divGroupTabs" role="tablist"></div>
+        <div class="etf-list div-etf-list" id="divEtfList"></div>
+        <div class="sumline"><span id="divSum">비중 합 0%</span><span>자동 정규화</span></div>
+        <div class="btn-row">
+          <button type="button" class="secondary" id="divClear">선택 초기화</button>
+          <button type="button" class="primary" id="divRun">배당 시뮬 실행</button>
+        </div>
+        <p class="muted-note" id="divDataNote"></p>
+      </aside>
+      <main id="divResult"><div class="card pad empty">프리셋을 고르거나 종목을 선택한 뒤 「배당 시뮬 실행」을 누르세요.</div></main>
+    </div>
     <p class="foot">
       시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.
       모멘텀·역변동성·이동평균 등 파라미터는 민감합니다. 특정 설정을 따라가면 수익이 난다는 뜻이 아닙니다.
-      시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
-      이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다. 실제 TR 시계열이 있을 때만 TR 토글이 활성화됩니다.
+      시세는 FinanceDataReader(KRX/네이버) 수정주가(분배락 조정) 종가입니다. 가격 시뮬은 수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬입니다. 별도 TR 가산은 이중 계산이라 제공하지 않습니다.
+      배당 현금흐름 탭은 원가격(분할만 조정)과 실제 분배 이벤트(국내: KRX KIND 공시, 미국: 발행사·Nasdaq·stockanalysis·Yahoo 대조), USDKRW(FRED DEXKOUS + Yahoo 보완, 전일 환율)로 계산하며 일반계좌 원천세(미국 15%, 국내 15.4%)만 반영합니다.
       리밸런싱 거래비용은 편도 회전율(TO)×비용률로 차감합니다(기본 0.10%).
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
@@ -333,6 +391,6 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=mobilefix1"></script>
+  <script src="./app.js?v=div1"></script>
 </body>
 </html>
