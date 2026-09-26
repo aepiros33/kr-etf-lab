@@ -593,3 +593,52 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
   .compare-table th, .compare-table td { padding: 7px 6px; font-size: 12px; }
 }
 .ma-freq-hint { color: var(--accent2); }
+
+/* Dividend cash-flow mode (div1) */
+.layout[hidden] { display: none; }
+.mode-switch { display: flex; gap: 8px; margin: 0 0 14px; flex-wrap: wrap; }
+.mode-btn {
+  flex: 1 1 220px; min-width: 0; text-align: left; cursor: pointer;
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  border-radius: 14px; padding: 10px 14px; font-size: 14px; font-weight: 700;
+}
+.mode-btn.active { border-color: var(--accent); color: var(--text); background: rgba(125,211,192,.08); }
+.mode-sub { display: block; font-size: 11px; font-weight: 500; color: var(--dim); margin-top: 2px; }
+.seg { display: flex; gap: 6px; margin-bottom: 8px; }
+.seg-opt { position: relative; flex: 1 1 0; min-width: 0; }
+.seg-opt input { position: absolute; opacity: 0; pointer-events: none; }
+.seg-opt span {
+  display: block; text-align: center; border: 1px solid var(--line); border-radius: 10px;
+  padding: 7px 6px; font-size: 12px; color: var(--muted); background: #0f151c; cursor: pointer; word-break: keep-all;
+}
+.seg-opt input:checked + span { border-color: var(--accent); color: var(--accent); background: rgba(125,211,192,.08); }
+.seg-opt input:focus-visible + span { outline: 2px solid var(--accent); }
+input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px; display: inline-block; }
+.etf-badge.us { color: #9ecbff; background: rgba(110,168,255,.14); border: 1px solid rgba(110,168,255,.4); }
+.etf-badge.cc { color: #ffb4c0; background: rgba(255,107,122,.12); border: 1px solid rgba(255,107,122,.4); }
+.etf-badge.unv { color: #f0c27a; background: rgba(240,194,122,.08); border: 1px dashed rgba(240,194,122,.5); }
+.kpis.div-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .kpis.div-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.div-kpis .val { font-size: 19px; overflow-wrap: anywhere; }
+.kpi .sub2 { font-size: 11px; color: var(--dim); margin-top: 4px; line-height: 1.35; }
+.div-head { margin-bottom: 12px; }
+.div-port { font-size: 13px; font-weight: 700; }
+.div-chart { height: auto; margin-bottom: 12px; }
+.div-chart .chart-title { font-size: 13px; font-weight: 700; color: var(--muted); padding: 8px 0 6px; }
+.div-chart .chart-box { position: relative; height: 280px; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; max-width: 100%; }
+.div-table { min-width: 560px; font-size: 12px; }
+.div-table th.num, .div-table td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+#divResult > .card.pad { margin-bottom: 12px; }
+.div-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); margin: 8px 0 0; }
+.div-legend i, .lg-dot { display: inline-block; width: 12px; height: 10px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+.lg-val { background: var(--accent); }
+.lg-nodata { background: #4a5563; }
+.lg-unver { background: repeating-linear-gradient(135deg, #f0c27a 0 2px, transparent 2px 5px); border: 1px solid #f0c27a; }
+.div-notes { font-size: 12px; color: var(--muted); line-height: 1.55; padding-left: 18px; margin: 6px 0 0; }
+.div-notes li { margin-bottom: 4px; }
+@media (max-width: 520px) {
+  .div-chart .chart-box { height: 240px; }
+  .div-kpis .val { font-size: 16px; }
+  .mode-btn { font-size: 13px; padding: 9px 10px; }
+}

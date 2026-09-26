@@ -4,7 +4,8 @@
 
 ## 제품
 
-한국거래소(KRX)에 상장된 ETF만으로 포트폴리오를 구성하고, 과거 가격 수익률을 보여주는 웹 시뮬레이터.
+한국거래소(KRX) 상장 ETF 중심의 포트폴리오 과거 시뮬레이터. 가격 시뮬은 **수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬**.
+비교 목적으로 일부 **미국 상장 ETF**를 「배당 현금흐름」 모드의 「해외 직투 비교」 그룹(`data/div_meta.json` `market:"US"`)으로만 제공한다. 미국 ETF는 **기본 프리셋·기본 전략·MOM/DMOM/XSMOM/MOM12_1/invVol 후보군(`etf_meta.json`)에 넣지 않는다**(가격 시뮬 결과 바이트 동일 유지). 레버리지/인버스 미국 ETF는 포함하지 않는다.
 
 - 실행: `python3 serve.py` → http://127.0.0.1:8765
 - 시세 갱신: `python3 agents/fast_ingest.py` (시총 상위 ~80, 메타+선택 로드용 종가)
@@ -29,7 +30,13 @@
 - 가격 > 0
 - 공통 거래일 20일 미만이면 에러
 - 투자 자문처럼 쓰지 말 것. 시뮬레이터 고지 유지
-- 분배금/TR 시계열이 없으면 **합성 TR을 만들지 말고** 「가격수익률 기준 · 분배금·세금 미반영」고지
+- 가격 시뮬 시세(FDR/NAVER, Yahoo `auto_adjust=True` 백필)는 **분배락을 되돌린 수정주가**다 → 고지는 「수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬」. 「가격수익률·분배금 미반영」이라고 쓰지 말 것
+- 수정주가 위에 추정 분배율을 다시 얹는 **합성 TR 금지**(이중 계산). TR 토글은 영구 비활성(`hasRealTrData()`=false, `buildTotalReturnPrices` no-op)
+- 절세 모형(일반계좌): 추정 분배금 15.4% + 매매차익(= 기말 − 원금 − 추정 분배금) × (국내주식형 0% / 그 외 15.4%) — 분배금 이중과세 금지
+- **배당 모드**는 **원가격(분할만 조정) 시계열 + 실제 분배 이벤트**로만 계산(`backtest_dividend` / `backtestDividend`, 기존 `backtest`와 분리). `priceBasis`가 `raw`/`raw_split_adjusted`가 아니면 FAIL. 수정주가(`data/prices`, `etf_prices.json`)를 배당 모드에 쓰지 말 것
+- 배당 모드 하루 순서: MTM(미국=USD×전일 환율) → 분배(배당락 prev<ex≤d, 전일 종가 보유 수량, 환율은 ex 이전 마지막 값, 세율 미국 15%/국내 15.4%) → 인출(장부 적립) 또는 같은 종목 재투자(비용 0.5×금액×비용률) → 월 적립 → 밴드 → 전체 재조정. 고정 비중(Q/Y/M/N)+밴드+적립만
+- 분배금이 없는 달은 0, **데이터 범위 밖은 「데이터 없음」, 정기 일정상 빠진 달은 「미확인」**(0으로 채우지 말 것). 월 집계는 **배당락일 기준**
+- 문구: 「월 ○원 받는다/월급처럼/추천/순위/최고」 금지 → 「과거 기준 ○원이었다」. TTM = 최근 완결 12개월(배당락월 기준, 진행 중인 마지막 달 제외), 월평균은 「월평균 = TTM÷12」 라벨
 
 ## 데이터
 
@@ -37,6 +44,13 @@
 - 메타: `data/etf_meta.json` (UI 목록) — GitHub Pages용으로 커밋 가능
 - 종가: `data/etf_prices.json` (번들, Pages/demo) + `data/prices/{code}.json` (선택 로드, gitignore)
 - Pages 데모를 위해 `etf_prices.json` / `etf_meta.json` 은 추적. `data/prices/` 만 무시
+- 주의: FDR(NAVER) 국내 ETF 종가는 **분배 반영 수정주가**다(예: KODEX 200 2020-04-28 원가격 25,650 vs FDR 22,774)
+- 배당 모드 데이터(`python3 agents/div_ingest.py`, 추적):
+  - 미국 ETF: Yahoo `auto_adjust=False` Close(분할만 조정) → `data/us/prices/{T}.json` (+연말 `adjAnchors` = Yahoo Adj, 리뷰 검증용)
+  - 분배: 발행사(SCHD Schwab `data/sources/`) > Nasdaq API > stockanalysis > Yahoo 우선순위 병합, 대조값 `chk` → `data/dividends/{T}.json`. Yahoo 결함(QQQ 2020-09 누락, 2010-06-25 중복, BND 금액 오류)은 교정. 빠진 달은 `gaps`(미확인)
+  - 국내 분배금: KRX KIND `ETF이익금분배신고` 공시(접수번호 `src`) → `data/dividends/{code}.json`; 국내 원가격 `data/prices_raw/{code}.json`(Yahoo `.KS` Close, auto_adjust=False). 배당락일 = 기준일 직전 KRX 거래일
+  - 환율: FRED `DEXKOUS` 기준 + 최근분 Yahoo `KRW=X`(주말 행 제외) → `data/fx/USDKRW.json`
+  - 목록·범위·미확인 구간: `data/div_meta.json`
 - pykrx는 KRX 로그인 필요할 수 있어 기본 경로로 쓰지 말 것
 - 유니버스는 시총 상위 유동성 KRX ETF. 레버리지/인버스는 태그 달고 기본 프리셋에 넣지 말 것
 
@@ -83,7 +97,7 @@
 
 1. ~~ETF 검색 + 카테고리 필터. 목록을 늘리되 시세는 선택 종목만 로드~~ (완료)
 2. ~~월 적립(DCA) 시뮬레이션~~ (완료)
-3. ~~분배금 데이터가 있으면 총수익(TR) 토글. 없으면 가격수익 고지를 더 명확히~~ (배치5: 가격수익 고지; 실제 TR 시계열 있을 때만 토글)
+3. ~~분배금 데이터가 있으면 총수익(TR) 토글. 없으면 가격수익 고지를 더 명확히~~ (배치5: 가격수익 고지; 실제 TR 시계열 있을 때만 토글) → **div1 정정**: 시세가 수정주가라 고지를 「수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬」로 바꾸고 TR 토글 폐지, 실제 분배금은 배당 현금흐름 모드
 4. ~~모바일 레이아웃 다듬기~~ (완료)
 5. 증권사 주문 연동은 하지 말 것 (규제)
 6. 선택 종목 시세만 다시 받는 부분 ingest / UI 캐시 개선

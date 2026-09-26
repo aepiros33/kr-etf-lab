@@ -1154,15 +1154,15 @@ def main():
     if 'id="maSignalFreq"' not in idx_chk or "MA 신호는 리밸 주기와 별도로 매월 판단" not in idx_chk:
         fail("MA signal-frequency option / monthly note missing from index.html")
 
-    # Price-return disclosure (no invented TR): UI must state price-return basis
+    # Return-basis disclosure (div1): prices are 수정주가 (distribution-adjusted) → notice must say so;
+    # synthetic TR on top would double count, so the TR gate must stay permanently closed.
     idx = (ROOT / "index.html").read_text(encoding="utf-8")
     app_js = (ROOT / "app.js").read_text(encoding="utf-8")
-    disclosure = "이 시뮬은 가격수익률 기준입니다"
-    if disclosure not in idx and disclosure not in app_js:
-        fail("price-return disclosure missing from UI")
-    # Fake synthetic TR must stay gated (no inventing dividends without real series)
+    disclosure = "수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬"
+    if disclosure not in idx:
+        fail("return-basis disclosure (수정주가 기준) missing from UI")
     if "hasRealTrData" not in app_js:
-        fail("hasRealTrData gate missing — synthetic TR must not run without real data")
+        fail("hasRealTrData gate missing — synthetic TR must not run")
 
     # Batch 6: start-date sensitivity heatmap (light invariants)
     sens_w = {"069500": 0.6, bond_band: 0.4}
@@ -1207,7 +1207,12 @@ def main():
     if "과거 시뮬" not in app_js or "투자 자문 아님" not in app_js:
         fail("sensitivity disclosure phrases missing")
 
+    # div1: dividend cash-flow mode + notice + byte-identical + JS/Py parity (96 + golden)
+    import review_dividend
+    div_summary = review_dividend.run(fail)
+
     print("PASS")
+    print("dividend:", div_summary)
 
     print(
         f"etfs={len(etfs)} prices={len(prices)} "

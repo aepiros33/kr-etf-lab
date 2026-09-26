@@ -257,7 +257,7 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
       <div>
         <div class="eyebrow">KR ETF Lab · Agent build</div>
         <h1>한국에서 사는 ETF로 포트 짜고 과거 수익률 보기</h1>
-        <p class="sub">오프라인 데모 · 가격 내장. KRX 상장 ETF만 넣었습니다. 검색·카테고리로 고르고, 비중과 월 적립을 정하면 공통 상장 기간의 가격 수익률을 계산합니다.</p>
+        <p class="sub">오프라인 데모 · 가격 내장. KRX 상장 ETF만 넣었습니다. 검색·카테고리로 고르고, 비중과 월 적립을 정하면 공통 상장 기간의 수익률을 계산합니다(수정주가 기준 · 분배금 세전 재투자 효과 포함 · 세금 미반영 · 과거 시뮬).</p>
       </div>
       <div class="stamp" id="stamp"></div>
     </header>
@@ -395,11 +395,10 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
         </div>
 
         <div class="section-title">분배금 · 총수익</div>
-        <label class="toggle">
-          <input type="checkbox" id="trOn" />
-          <span>분배금 재투자 (Total Return)</span>
-        </label>
-        <p class="muted-note">분배율은 모델값이며 실제 분배금과 다를 수 있음.</p>
+        <div class="price-return-box" style="border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:12px;font-size:12px">
+          <strong>수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬</strong>
+          <p class="muted-note" style="margin:6px 0 0">시세가 분배락을 되돌린 수정주가라 분배금(세전) 재투자 효과가 이미 들어 있습니다. 예전 「분배금 재투자(TR)」 토글은 모델 분배율을 한 번 더 얹어 이중 계산이 되어 폐지했습니다.</p>
+        </div>
 
         <div class="section-title">계좌 · 세금 모형 (단순화)</div>
         <label class="toggle">
@@ -441,8 +440,7 @@ td { padding: 7px 0; border-bottom: 1px solid rgba(39,49,64,.6); font-variant-nu
     <p class="foot">
       시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.
       모멘텀·역변동성·이동평균 등 파라미터는 민감합니다. 특정 설정을 따라가면 수익이 난다는 뜻이 아닙니다.
-      시세는 FinanceDataReader(KRX/네이버) 종가이며 수정주가·분배금 재투자를 완전히 반영하지 않을 수 있습니다.
-      Total Return 토글 시 분배율은 카테고리·종목 모델값입니다. 실제 분배금·세금·수수료와 다를 수 있습니다.
+      시세는 FinanceDataReader(KRX/네이버) 수정주가(분배락 조정) 종가입니다. 수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬입니다. 별도 TR 가산은 이중 계산이라 제공하지 않습니다.
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
       KRX 원자재 ETF 상당수는 선물·환헤지(H)이나, 본 슬리브 기본종목 ACE KRX금현물(411060)은 금 현물 추종이라 선물 롤 손익과 다를 수 있음.
@@ -685,8 +683,13 @@ function annualYieldFor(code) {
   return CAT_YIELD[etf?.category] ?? 0.015;
 }
 
-/** Clone price map and compound daily yield into synthetic TR series (backtest only). */
+/** DISABLED (no-op): 시세가 이미 수정주가(분배금 반영)라 모델 분배율 가산은 이중 계산. */
 function buildTotalReturnPrices(priceMap, codes) {
+  return priceMap;
+}
+
+/** Legacy synthetic TR (audit record; never called). */
+function _legacySyntheticTrPrices(priceMap, codes) {
   const out = {};
   for (const code of Object.keys(priceMap)) {
     if (!codes.includes(code) && code !== BENCH) {
@@ -1100,8 +1103,8 @@ function renderCorrCard(corr) {
 }
 
 /**
- * Simplified tax model (not tax advice).
- * Taxable: annual distribution yield tax drag 15.4% + exit tax 15.4% on remaining gain.
+ * Simplified tax model (not tax advice). 시세가 수정주가라 기말 평가액에 추정 분배금이 이미 포함.
+ * Taxable: 추정 분배금 × 15.4% + 매매차익(기말 − 원금 − 추정 분배금) × (국내주식형 0% / 그 외 15.4%, 비중 가중).
  * Pension: no annual tax; exit tax at selected pension rate on gain.
  */
 function simulateTax(result, picks) {
@@ -1110,13 +1113,19 @@ function simulateTax(result, picks) {
   const years = Math.max(result.years || 0, 0);
   const tw = result.weights || {};
   let yld = 0;
-  for (const [c, w] of Object.entries(tw)) yld += w * annualYieldFor(c);
+  let exitRate = 0;
+  for (const [c, w] of Object.entries(tw)) {
+    yld += w * annualYieldFor(c);
+    const etf = etfByCode(c);
+    exitRate += w * (etf && etf.category === "국내주식" ? 0 : 0.154);
+  }
 
   const avgCapital = (invested + final) / 2;
-  const annualYieldTax = avgCapital * yld * 0.154 * years;
-  const afterAnnual = Math.max(0, final - annualYieldTax);
-  const taxableGain = Math.max(0, afterAnnual - invested);
-  const taxableFinal = afterAnnual - taxableGain * 0.154;
+  const totalGain = Math.max(0, final - invested);
+  const estDistributions = Math.min(totalGain, avgCapital * yld * years);
+  const annualYieldTax = estDistributions * 0.154;
+  const exitTax = Math.max(0, totalGain - estDistributions) * exitRate;
+  const taxableFinal = final - annualYieldTax - exitTax;
 
   const pensionRate = state.pensionTaxRate;
   const pensionGain = Math.max(0, final - invested);
@@ -1127,7 +1136,10 @@ function simulateTax(result, picks) {
 
   return {
     yld,
+    exitRate,
+    estDistributions,
     annualYieldTax,
+    exitTax,
     taxableFinal,
     pensionFinal,
     pensionRate,
@@ -1143,7 +1155,7 @@ function renderTaxCard(tax) {
   const mode =
     state.accountType === "pension"
       ? `연금저축/IRP/ISA · 인출세 ${(tax.pensionRate * 100).toFixed(1)}%`
-      : `일반 계좌 · 연분배 드래그+출구 15.4%`;
+      : `일반 계좌 · 추정 분배금 15.4% + 매매차익(국내주식형 비과세·그 외 15.4%)`;
   return `<div class="card pad"><div class="section-title">절세 비교 (단순 모형)</div>
     <div class="tax-grid">
       <div><div class="label">세전 기말</div><div class="val">${won(tax.preTaxFinal)}</div></div>
@@ -1151,7 +1163,7 @@ function renderTaxCard(tax) {
       <div><div class="label">연금 계좌 모형</div><div class="val">${won(tax.pensionFinal)}</div></div>
       <div><div class="label">절세 보너스</div><div class="val ${tax.bonus >= 0 ? "pos" : "neg"}">${won(tax.bonus)}</div></div>
     </div>
-    <div class="warn">선택: ${mode} · 포트 모델 분배율 ~${(tax.yld * 100).toFixed(1)}%/년 · 수수료·중도인출·한도 미반영 · 세무 자문 아님</div>
+    <div class="warn">선택: ${mode} · 포트 모델 분배율 ~${(tax.yld * 100).toFixed(1)}%/년(추정) · 분배금은 수정주가 평가액에 이미 포함 → 매매차익에서 제외(이중과세 없음) · 수수료·중도인출·한도 미반영 · 세무 자문 아님</div>
   </div>`;
 }
 
@@ -1236,9 +1248,7 @@ async function run() {
       ...(needGold ? [GOLD_CODE, GOLD_CASH] : []),
     ]),
   ];
-  const priceMap = state.totalReturn
-    ? buildTotalReturnPrices(state.prices, loadCodes)
-    : state.prices;
+  const priceMap = state.prices; // TR 가산 폐지(수정주가 = 분배금 세전 재투자 포함)
   if ((state.rebalance === "MOM" || state.rebalance === "DMOM") && !picks.length) {
     $("#result").innerHTML = `<div class="card pad empty">모멘텀 유니버스가 비어 있습니다. ETF를 선택하세요.</div>`;
     return;
@@ -2279,10 +2289,8 @@ function renderResult(r, bench, picks, corr, tax) {
     r.monthlyContribution > 0
       ? `<div class="warn">월 적립 · 납입 합 ${won(r.totalInvested)} → 기말 ${won(r.finalValue)} · ${r.contributions}회 납입 · 수익률은 납입 원금 합 대비</div>`
       : "";
-  const trNote = state.totalReturn
-    ? `<div class="warn">Total Return 모드 · 분배율 모델값으로 일별 합성 가격 사용 · 실제 분배금과 다를 수 있음</div>`
-    : "";
-  const retLabel = state.totalReturn ? "가격+분배(모형)" : "가격수익률(분배금 미포함)";
+  const trNote = `<div class="warn">수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬</div>`;
+  const retLabel = "수정주가 기준(분배금 세전 재투자 포함·세금 미반영)";
   destroyExtraCharts();
   const dd = computeDrawdown(r.curve);
   const benchDd = bench && bench.curve ? computeDrawdown(bench.curve) : null;
@@ -2398,7 +2406,6 @@ function reviewAgent(r, bench, picks) {
     );
     lines.push(`· 납입 합 ${won(r.totalInvested)}, 기말 평가 ${won(r.finalValue)}.`);
   }
-  if (state.totalReturn) lines.push("· Total Return(분배 모형) 적용 중입니다.");
   const vs = r.cagr - (bench.cagr || 0);
   if (vs > 0.01) lines.push(`· 같은 기간 KODEX 200보다 연환산 ${pct(vs)} 앞섭니다.`);
   else if (vs < -0.01) lines.push(`· KODEX 200보다 연환산 ${pct(vs)} 뒤처졌습니다.`);
@@ -2412,7 +2419,7 @@ function reviewAgent(r, bench, picks) {
   lines.push(
     "",
     "한계",
-    "· 기본은 가격 수익률입니다. TR 토글 시에도 분배율은 모델값입니다.",
+    "· 수정주가 기준입니다(분배금 세전 재투자 효과 포함) · 세금 미반영. TR 가산은 이중 계산이라 쓰지 않습니다.",
     "· 세금·수수료 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
     "· 월 적립 연환산은 납입 원금 합 대비 단순 계산입니다.",
@@ -2539,9 +2546,6 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   $("#monthlyAmount").onchange = (e) => {
     state.monthlyAmount = Math.max(0, Number(e.target.value) || 0);
-  };
-  $("#trOn").onchange = (e) => {
-    state.totalReturn = e.target.checked;
   };
   const syncAcct = () => {
     state.accountType = $("#acctPension").checked ? "pension" : "taxable";

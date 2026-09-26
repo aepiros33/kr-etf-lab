@@ -698,7 +698,7 @@ function exportRunCsv() {
   lines.push(["meta", "generated", new Date().toISOString().slice(0, 19)].map(csvEscape).join(","));
   lines.push(["meta", "pricesAsOf", state.pricesAsOf || ""].map(csvEscape).join(","));
   lines.push(["meta", "note", "시뮬레이터 결과 내보내기 · 투자 자문 아님"].map(csvEscape).join(","));
-  lines.push(["meta", "returnBasis", "가격수익률(분배금·세금 미반영)"].map(csvEscape).join(","));
+  lines.push(["meta", "returnBasis", "수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬"].map(csvEscape).join(","));
   lines.push(["meta", "costFormula", "리밸런싱 시 value -= value×TO×rate; TO=0.5×Σ|Δw|"].map(csvEscape).join(","));
   lines.push("");
   lines.push("section,code,name,weight_pct");
@@ -847,8 +847,17 @@ function annualYieldFor(code) {
   return CAT_YIELD[etf?.category] ?? 0.015;
 }
 
-/** Clone price map and compound daily yield into synthetic TR series (backtest only). */
+/**
+ * DISABLED (no-op). 시세(FDR/NAVER·Yahoo auto_adjust)는 이미 분배금이 반영된 수정주가라
+ * 추정 분배율을 다시 복리로 얹으면 분배금이 이중 계산된다(K-올웨더 2012-02~ 기준 연환산 8.0%→10.1%, +2.1%p 과대).
+ * 실제 분배금 흐름은 「배당 현금흐름」 모드(원가격 + 실제 분배 이벤트)에서만 계산한다.
+ */
 function buildTotalReturnPrices(priceMap, codes) {
+  return priceMap;
+}
+
+/** Legacy synthetic TR (kept for the audit record only; never called). */
+function _legacySyntheticTrPrices(priceMap, codes) {
   const out = {};
   for (const code of Object.keys(priceMap)) {
     if (!codes.includes(code) && code !== BENCH) {
@@ -1505,22 +1514,37 @@ function renderCorrCard(corr) {
 
 /**
  * Simplified tax model (not tax advice).
- * Taxable: annual distribution yield tax drag 15.4% + exit tax 15.4% on remaining gain.
- * Pension: no annual tax; exit tax at selected pension rate on gain.
+ * 시세가 수정주가(분배금 세전 재투자 포함)이므로 기말 평가액에는 추정 분배금이 이미 들어 있다.
+ * Taxable: (a) 추정 분배금 = 평균자본 × 모델 분배율 × 연수 → 15.4% (보유 중 원천징수)
+ *          (b) 매매차익 = 기말 − 원금 − 추정 분배금 (분배금 부분은 (a)에서 과세 → 이중과세 제외)
+ *              국내주식형 0%(매매차익 비과세), 그 외(국내상장 해외·채권·원자재 등) 15.4% — 비중 가중
+ * Pension: no annual tax; exit tax at selected pension rate on the whole gain (unchanged).
  */
+const TAX_DIST_RATE = 0.154;
+function exitTaxRateFor(code) {
+  const etf = etfByCode(code);
+  return etf && etf.category === "국내주식" ? 0 : TAX_DIST_RATE;
+}
+
 function simulateTax(result, picks) {
   const invested = result.totalInvested;
   const final = result.finalValue;
   const years = Math.max(result.years || 0, 0);
   const tw = result.weights || {};
   let yld = 0;
-  for (const [c, w] of Object.entries(tw)) yld += w * annualYieldFor(c);
+  let exitRate = 0;
+  for (const [c, w] of Object.entries(tw)) {
+    yld += w * annualYieldFor(c);
+    exitRate += w * exitTaxRateFor(c);
+  }
 
   const avgCapital = (invested + final) / 2;
-  const annualYieldTax = avgCapital * yld * 0.154 * years;
-  const afterAnnual = Math.max(0, final - annualYieldTax);
-  const taxableGain = Math.max(0, afterAnnual - invested);
-  const taxableFinal = afterAnnual - taxableGain * 0.154;
+  const totalGain = Math.max(0, final - invested);
+  const estDistributions = Math.min(totalGain, avgCapital * yld * years);
+  const annualYieldTax = estDistributions * TAX_DIST_RATE;
+  const priceGain = Math.max(0, totalGain - estDistributions);
+  const exitTax = priceGain * exitRate;
+  const taxableFinal = final - annualYieldTax - exitTax;
 
   const pensionRate = state.pensionTaxRate;
   const pensionGain = Math.max(0, final - invested);
@@ -1531,7 +1555,10 @@ function simulateTax(result, picks) {
 
   return {
     yld,
+    exitRate,
+    estDistributions,
     annualYieldTax,
+    exitTax,
     taxableFinal,
     pensionFinal,
     pensionRate,
@@ -1547,7 +1574,7 @@ function renderTaxCard(tax) {
   const mode =
     state.accountType === "pension"
       ? `연금저축/IRP/ISA · 인출세 ${(tax.pensionRate * 100).toFixed(1)}%`
-      : `일반 계좌 · 연분배 드래그+출구 15.4%`;
+      : `일반 계좌 · 추정 분배금 15.4% + 매매차익(국내주식형 비과세·그 외 15.4%, 가중 ${(tax.exitRate * 100).toFixed(1)}%)`;
   return `<div class="card pad"><div class="section-title">절세 비교 (단순 모형)</div>
     <div class="tax-grid">
       <div><div class="label">세전 기말</div><div class="val">${won(tax.preTaxFinal)}</div></div>
@@ -1555,7 +1582,7 @@ function renderTaxCard(tax) {
       <div><div class="label">연금 계좌 모형</div><div class="val">${won(tax.pensionFinal)}</div></div>
       <div><div class="label">절세 보너스</div><div class="val ${tax.bonus >= 0 ? "pos" : "neg"}">${won(tax.bonus)}</div></div>
     </div>
-    <div class="warn">선택: ${mode} · 포트 모델 분배율 ~${(tax.yld * 100).toFixed(1)}%/년 · 수수료·중도인출·한도 미반영 · 세무 자문 아님</div>
+    <div class="warn">선택: ${mode} · 포트 모델 분배율 ~${(tax.yld * 100).toFixed(1)}%/년(추정치) · 시세가 수정주가라 분배금은 기말 평가액에 이미 포함 → 분배금 과세분은 매매차익에서 제외(이중과세 없음) · 수수료·중도인출·한도 미반영 · 세무 자문 아님</div>
   </div>`;
 }
 
@@ -1729,6 +1756,8 @@ async function run() {
       bonus: tax.bonus * scale,
       invested: tax.invested * scale,
       annualYieldTax: tax.annualYieldTax * scale,
+      exitTax: tax.exitTax * scale,
+      estDistributions: tax.estDistributions * scale,
     };
   }
   const windowInfo = result.error ? null : buildWindowInfo(result, picks, start, end);
@@ -2266,8 +2295,16 @@ function oneWayTurnover(wOld, wNew) {
   return 0.5 * s;
 }
 
-/** Real TR series only — never invent dividends. meta.hasTotalReturn / etf.tr|trCode */
+/**
+ * TR 토글 영구 비활성. 가격 시뮬 시세가 이미 수정주가(분배금 세전 재투자 효과 포함)라
+ * 별도 TR/분배 가산은 어떤 경우에도 이중 계산이 된다. 실제 분배금은 배당 현금흐름 모드에서만.
+ */
 function hasRealTrData() {
+  return false;
+}
+
+/** Legacy flag probe (audit record; unused). */
+function _legacyHasTrFlag() {
   const m = state.meta;
   if (!m) return false;
   if (m.hasTotalReturn === true || m.hasTR === true) return true;
@@ -4276,8 +4313,8 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
   const usingTr = state.totalReturn && hasRealTrData();
   const trNote = usingTr
     ? `<div class="warn">Total Return · 실제 TR/분배 시계열 적용 · 세금 미반영</div>`
-    : `<div class="warn price-return-banner">이 시뮬은 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.</div>`;
-  const retLabel = usingTr ? "총수익(TR·분배 포함)" : "가격수익률(분배금 미포함)";
+    : `<div class="warn price-return-banner">이 시뮬은 수정주가 기준입니다(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬. 분배금 현금흐름은 「배당 현금흐름」 모드에서 원가격+실제 분배금으로 따로 봅니다.</div>`;
+  const retLabel = usingTr ? "총수익(TR·분배 포함)" : "수정주가 기준(분배금 세전 재투자 포함·세금 미반영)";
   const costRate = r.tradeCost != null ? Number(r.tradeCost) : clampTradeCost(state.tradeCost);
   const costDrag = r.totalCostDrag != null ? Number(r.totalCostDrag) : 0;
   const costNote = `<div class="warn">거래비용 · 가정 ${ (costRate * 100).toFixed(2) }% (${ Math.round(costRate * 10000) }bps) · 누적 비용드래그 ${
@@ -4415,7 +4452,7 @@ function reviewAgent(r, bench, picks) {
     lines.push(`· 납입 합 ${won(r.totalInvested)}, 기말 평가 ${won(r.finalValue)}.`);
   }
   if (state.totalReturn && hasRealTrData()) lines.push("· Total Return(실제 TR 시계열) 적용 중입니다.");
-  else lines.push("· 가격수익률 기준입니다. 분배금·세금은 반영하지 않습니다.");
+  else lines.push("· 수정주가 기준입니다(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬.");
   lines.push(`· 거래비용 ${ (clampTradeCost(state.tradeCost) * 100).toFixed(2) }% · 누적 드래그 ${ r.totalCostDrag != null ? Number(r.totalCostDrag).toFixed(6) : "—" }.`);
   const vs = r.cagr - (bench.cagr || 0);
   if (vs > 0.01) lines.push(`· 같은 기간 KODEX 200보다 연환산 ${pct(vs)} 앞섭니다.`);
@@ -4430,7 +4467,7 @@ function reviewAgent(r, bench, picks) {
   lines.push(
     "",
     "한계",
-    "· 기본은 가격 수익률입니다. 분배금 TR 시계열이 있을 때만 TR 토글이 켜집니다.",
+    "· 시세는 수정주가라 분배금(세전) 재투자 효과가 이미 들어 있습니다. 별도 TR 가산은 이중 계산이라 쓰지 않습니다.",
     "· 리밸런싱 거래비용은 편도 회전율(TO)×비용률로 차감합니다.",
     "· 세금 모형은 단순화되어 있습니다.",
     "· 과거 숫자로 미래 비중을 정하면 안 됩니다.",
@@ -4705,4 +4742,953 @@ document.addEventListener("DOMContentLoaded", () => {
   boot().catch((err) => {
     $("#result").innerHTML = `<div class="card pad empty">${err.message || err}</div>`;
   });
+});
+
+// ==== DIVIDEND MODE (v1) ====
+// Separate engine: backtest() above is untouched (dividend-off results byte-identical).
+// Uses ONLY raw price series (US: split-adjusted, dividends NOT adjusted · KR: raw .KS close)
+// + real distribution events. 수정주가 + 분배금을 동시에 쓰면 이중계산 → basis 검사로 거부.
+// Mirrors agents/build_backtest.py backtest_dividend() step by step (JS↔Py parity ≤1e-9).
+const DIV_TAX_RATES = { US_DIRECT: 0.15, KR_LISTED: 0.154 };
+const DIV_ALLOWED_BASIS = ["raw", "raw_split_adjusted"];
+const DIV_REBAL_MODES = ["Q", "Y", "M", "N"];
+
+function divFxAsOf(fxDates, fxVals, d) {
+  // last USDKRW strictly before d (previous-day FX, no look-ahead) = bisect_left − 1
+  let lo = 0,
+    hi = fxDates.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (fxDates[mid] < d) lo = mid + 1;
+    else hi = mid;
+  }
+  const i = lo - 1;
+  return i >= 0 ? fxVals[i] : null;
+}
+
+function divMinusDays(d, n) {
+  const t = Date.UTC(Number(d.slice(0, 4)), Number(d.slice(5, 7)) - 1, Number(d.slice(8, 10)));
+  return new Date(t - n * 86400000).toISOString().slice(0, 10);
+}
+
+function divMonths(a, b) {
+  let y = Number(a.slice(0, 4)),
+    m = Number(a.slice(5, 7));
+  const ey = Number(b.slice(0, 4)),
+    em = Number(b.slice(5, 7));
+  const out = [];
+  while (y < ey || (y === ey && m <= em)) {
+    out.push(`${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}`);
+    m += 1;
+    if (m > 12) {
+      y += 1;
+      m = 1;
+    }
+  }
+  return out;
+}
+
+function divEdgeWeekday(ym, last) {
+  const y = Number(ym.slice(0, 4)),
+    m = Number(ym.slice(5, 7));
+  let t = last ? Date.UTC(y, m, 1) - 86400000 : Date.UTC(y, m - 1, 1);
+  for (;;) {
+    const wd = new Date(t).getUTCDay();
+    if (wd !== 0 && wd !== 6) break;
+    t += last ? -86400000 : 86400000;
+  }
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+function divShiftYm(ym, k) {
+  const n = Number(ym.slice(0, 4)) * 12 + Number(ym.slice(5, 7)) - 1 + k;
+  return `${String(Math.floor(n / 12)).padStart(4, "0")}-${String((n % 12) + 1).padStart(2, "0")}`;
+}
+
+function divInRanges(ym, ranges) {
+  return (ranges || []).some((g) => g.from <= ym && ym <= g.to);
+}
+
+function backtestDividend(weights, data, start, end, rebalance, initialCapital = 1, monthlyContribution = 0, opts = {}) {
+  const mode = opts.mode === "reinvest" ? "reinvest" : "cash";
+  const cost = clampTradeCost(opts.cost != null ? opts.cost : TRADE_COST_DEFAULT);
+  const taxRates = { ...DIV_TAX_RATES, ...(opts.taxRates || {}) };
+  const bandOn = !!opts.bandOn;
+  const bandPct = bandOn ? clampBandPct(opts.bandPct) : 0;
+  const codes = Object.keys(weights).filter((c) => weights[c] > 0);
+  if (!codes.length) return { error: "ETF를 선택하세요." };
+  if (!DIV_REBAL_MODES.includes(rebalance)) return { error: "배당 모드는 고정 비중(분기·연·매월·없음)만 지원합니다." };
+  for (const c of codes) {
+    if (!data.prices[c]) return { error: `${c} 원가격 시세가 없습니다.` };
+    if (!DIV_ALLOWED_BASIS.includes(data.basis[c]))
+      return { error: `${c}: 배당 모드는 원가격(분배 미조정) 시계열만 허용합니다(수정주가+분배금 이중계산 방지).` };
+  }
+  const totalW = codes.reduce((s, c) => s + weights[c], 0);
+  const tw = Object.fromEntries(codes.map((c) => [c, weights[c] / totalW]));
+  const meta = data.meta;
+  const isUs = Object.fromEntries(codes.map((c) => [c, (meta[c] || {}).market === "US"]));
+  const fxDates = data.fx ? data.fx.map((r) => r[0]) : [];
+  const fxVals = data.fx ? data.fx.map((r) => r[1]) : [];
+  const anyUs = codes.some((c) => isUs[c]);
+  if (anyUs && !fxDates.length) return { error: "USDKRW 환율 데이터가 없습니다." };
+
+  const sets = codes.map((c) => new Set(Object.keys(data.prices[c]).filter((d) => d >= start && d <= end)));
+  let common = [...sets[0]];
+  for (const s of sets.slice(1)) common = common.filter((d) => s.has(d));
+  common.sort();
+  if (anyUs) common = common.filter((d) => divFxAsOf(fxDates, fxVals, d) != null);
+  if (common.length < 20) return { error: "선택한 ETF의 공통 기간이 너무 짧습니다." };
+  const day0 = common[0],
+    lastD = common[common.length - 1];
+
+  const pk = {};
+  const fxOn = {};
+  for (const d of common) fxOn[d] = anyUs ? divFxAsOf(fxDates, fxVals, d) : 1.0;
+  for (const c of codes) {
+    const src = data.prices[c];
+    pk[c] = {};
+    for (const d of common) pk[c][d] = isUs[c] ? src[d] * fxOn[d] : src[d];
+  }
+
+  const evByCode = {};
+  for (const c of codes) evByCode[c] = data.div[c].events.filter((e) => day0 < e.ex && e.ex <= lastD);
+  const ptr = Object.fromEntries(codes.map((c) => [c, 0]));
+
+  const q = (m) => Math.floor((Number(m) - 1) / 3);
+  const isRebal = (prev, cur) => {
+    if (rebalance === "N") return false;
+    const py = prev.slice(0, 4),
+      pm = prev.slice(5, 7),
+      cy = cur.slice(0, 4),
+      cm = cur.slice(5, 7);
+    if (rebalance === "Y") return py !== cy;
+    if (rebalance === "M") return prev.slice(0, 7) !== cur.slice(0, 7);
+    return py !== cy || q(pm) !== q(cm);
+  };
+  const sumUnits = (u, d) => Object.keys(u).reduce((s, c) => s + u[c] * pk[c][d], 0);
+
+  let units = Object.fromEntries(codes.map((c) => [c, (tw[c] * initialCapital) / pk[c][day0]]));
+  let value = codes.reduce((s, c) => s + units[c] * pk[c][day0], 0);
+  let invested = Number(initialCapital);
+  let contributions = 1;
+  let withdrawn = 0;
+  let totalCost = 0;
+  let rebalCount = 0,
+    dcaCount = 0,
+    reinvestCount = 0;
+  let peakW = value,
+    mdd = 0,
+    peakH = value,
+    mddH = 0;
+  const eventsLog = [];
+  const curve = [{ d: day0, v: value, w: value, inv: invested }];
+  let prev = day0;
+  for (const d of common.slice(1)) {
+    value = codes.filter((c) => c in units).reduce((s, c) => s + units[c] * pk[c][d], 0);
+    for (const c of codes) {
+      const lst = evByCode[c];
+      while (ptr[c] < lst.length && lst[ptr[c]].ex <= d) {
+        const e = lst[ptr[c]];
+        ptr[c] += 1;
+        const u = units[c] || 0;
+        if (!(u > 0)) continue;
+        const fx = isUs[c] ? divFxAsOf(fxDates, fxVals, e.ex) : 1.0;
+        const native = u * e.amt;
+        const gross = native * fx;
+        const prof = data.div[c].taxProfile || "KR_LISTED";
+        const rate = Number(taxRates[prof] || 0);
+        const tax = gross * rate;
+        const net = gross - tax;
+        const rec = { ex: e.ex, d, code: c, amt: e.amt, units: u, fx, native, gross, tax, net, src: e.src };
+        if (mode === "cash") {
+          withdrawn += net;
+        } else {
+          const cCost = 0.5 * net * cost;
+          totalCost += cCost;
+          units[c] = u + (net - cCost) / pk[c][d];
+          value += net - cCost;
+          reinvestCount += 1;
+        }
+        eventsLog.push(rec);
+      }
+    }
+    const newMonth = prev.slice(0, 7) !== d.slice(0, 7);
+    let doFull = bandOn ? false : isRebal(prev, d);
+    let contrib = 0;
+    if (monthlyContribution > 0 && newMonth) {
+      contrib = Number(monthlyContribution);
+      value += contrib;
+      invested += contrib;
+      contributions += 1;
+    }
+    if (!doFull && contrib > 0) {
+      const wOld = currentWeights(units, pk, d, value);
+      const newUnits = { ...units };
+      dcaCount += 1;
+      for (const [c, w] of Object.entries(tw)) {
+        if (w > 0) newUnits[c] = (newUnits[c] || 0) + (contrib * w) / pk[c][d];
+      }
+      if (cost > 0) {
+        const wNew = currentWeights(newUnits, pk, d, value);
+        const to = oneWayTurnover(wOld, wNew);
+        if (to > 0) {
+          totalCost += value * to * cost;
+          const k = 1 - to * cost;
+          for (const c of Object.keys(newUnits)) newUnits[c] *= k;
+        }
+      }
+      units = Object.fromEntries(Object.entries(newUnits).filter(([, u]) => u > 0));
+      value = sumUnits(units, d);
+    }
+    if (bandOn && !doFull && bandDriftExceeds(units, pk, d, value, tw, bandPct)) doFull = true;
+    if (doFull) {
+      rebalCount += 1;
+      const wOld = currentWeights(units, pk, d, value);
+      if (cost > 0) {
+        const to = oneWayTurnover(wOld, tw);
+        if (to > 0) {
+          const drag = value * to * cost;
+          totalCost += drag;
+          value -= drag;
+        }
+      }
+      units = Object.fromEntries(codes.map((c) => [c, (tw[c] * value) / pk[c][d]]));
+      value = codes.reduce((s, c) => s + units[c] * pk[c][d], 0);
+    }
+    const wealth = value + withdrawn;
+    peakW = Math.max(peakW, wealth);
+    mdd = Math.min(mdd, wealth / peakW - 1);
+    peakH = Math.max(peakH, value);
+    mddH = Math.min(mddH, value / peakH - 1);
+    curve.push({ d, v: value, w: wealth, inv: invested });
+    prev = d;
+  }
+
+  // ---- aggregation (label month = actual ex-date month) ----
+  const months = divMonths(day0, lastD);
+  const mrow = {};
+  for (const ym of months) mrow[ym] = { ym, gross: 0, tax: 0, net: 0, count: 0, byCode: {} };
+  for (const r of eventsLog) {
+    const m = mrow[r.ex.slice(0, 7)];
+    m.gross += r.gross;
+    m.tax += r.tax;
+    m.net += r.net;
+    m.count += 1;
+    const b = (m.byCode[r.code] ||= { gross: 0, tax: 0, net: 0, native: 0 });
+    b.gross += r.gross;
+    b.tax += r.tax;
+    b.net += r.net;
+    b.native += r.native;
+  }
+  const firstWd = divEdgeWeekday(months[0], false);
+  const lastWd = divEdgeWeekday(months[months.length - 1], true);
+  for (const ym of months) {
+    const m = mrow[ym];
+    const noData = [],
+      unver = [];
+    for (const c of codes) {
+      const cov = data.div[c].coverage || {};
+      if (ym < (cov.from || "0000").slice(0, 7) || ym > (cov.to || "9999").slice(0, 7)) noData.push(c);
+      else if (divInRanges(ym, data.div[c].gaps)) unver.push(c);
+    }
+    let st;
+    if (noData.length === codes.length) st = "no_data";
+    else if (noData.length) st = "partial";
+    else if (unver.length) st = "unverified";
+    else st = "ok";
+    m.status = st;
+    if (noData.length) m.noData = noData;
+    if (unver.length) m.unverified = unver;
+    const inc = (ym === months[0] && day0 > firstWd) || (ym === months[months.length - 1] && lastD < lastWd);
+    if (inc) m.inc = true;
+  }
+  const monthList = months.map((ym) => mrow[ym]);
+
+  const years = [];
+  const ys = [...new Set(months.map((ym) => ym.slice(0, 4)))].sort();
+  let prevY = null;
+  for (const y of ys) {
+    const rows = months.filter((ym) => ym.slice(0, 4) === y).map((ym) => mrow[ym]);
+    const g = rows.reduce((s, r) => s + r.gross, 0);
+    const t = rows.reduce((s, r) => s + r.tax, 0);
+    const n = rows.reduce((s, r) => s + r.net, 0);
+    let usdNative = 0,
+      usdKrw = 0;
+    for (const r of eventsLog) {
+      if (r.ex.slice(0, 4) === y && isUs[r.code]) {
+        usdNative += r.native;
+        usdKrw += r.gross;
+      }
+    }
+    const yr = {
+      y,
+      gross: g,
+      tax: t,
+      net: n,
+      count: rows.reduce((s, r) => s + r.count, 0),
+      partial: (y === ys[0] && day0 > `${y}-01-07`) || (y === ys[ys.length - 1] && lastD < `${y}-12-24`),
+      status: "ok",
+    };
+    const sts = new Set(rows.map((r) => r.status));
+    if (sts.has("no_data") || sts.has("partial")) yr.status = "partial";
+    else if (sts.has("unverified")) yr.status = "unverified";
+    if (anyUs) {
+      yr.usdGross = usdNative;
+      yr.usdKrwGross = usdKrw;
+      yr.fxBar = usdNative > 0 ? usdKrw / usdNative : null;
+      if (prevY != null && !yr.partial && !prevY.partial && prevY.usdGross && usdNative > 0 && prevY.usdKrwGross > 0) {
+        yr.growthKrwPct = usdKrw / prevY.usdKrwGross - 1;
+        yr.growthUsdPct = usdNative / prevY.usdGross - 1;
+        yr.fxEffectPct = yr.fxBar / prevY.fxBar - 1;
+      }
+    }
+    years.push(yr);
+    prevY = yr;
+  }
+
+  // TTM = last 12 COMPLETE calendar months by ex-date month (incomplete final month excluded)
+  const lastM = months[months.length - 1];
+  const endM = mrow[lastM].inc ? divShiftYm(lastM, -1) : lastM;
+  const startM = divShiftYm(endM, -11);
+  const ttmMonths = months.filter((ym) => startM <= ym && ym <= endM);
+  const tt = eventsLog.filter((r) => startM <= r.ex.slice(0, 7) && r.ex.slice(0, 7) <= endM);
+  const ttm = {
+    from: startM,
+    to: endM,
+    gross: tt.reduce((s, r) => s + r.gross, 0),
+    tax: tt.reduce((s, r) => s + r.tax, 0),
+    net: tt.reduce((s, r) => s + r.net, 0),
+    count: tt.length,
+    short: months[0] > startM || (months[0] === startM && !!mrow[startM].inc),
+    flags: [...new Set(ttmMonths.map((ym) => mrow[ym].status))].filter((s) => s !== "ok").sort(),
+    label: "월평균 = TTM÷12",
+  };
+  ttm.monthlyAvg = ttm.net / 12;
+  ttm.monthlyAvgGross = ttm.gross / 12;
+
+  const byCode = {};
+  for (const r of eventsLog) {
+    const b = (byCode[r.code] ||= { gross: 0, tax: 0, net: 0, native: 0, count: 0 });
+    b.gross += r.gross;
+    b.tax += r.tax;
+    b.net += r.net;
+    b.native += r.native;
+    b.count += 1;
+  }
+
+  const nDays = common.length - 1;
+  const yrs = nDays / 252;
+  const finalValue = value;
+  const wealth = value + withdrawn;
+  return {
+    mode,
+    basis: "ex_date",
+    start: day0,
+    end: lastD,
+    days: nDays,
+    years: yrs,
+    codes,
+    weights: tw,
+    rebalance,
+    initial: Number(initialCapital),
+    monthly: Number(monthlyContribution),
+    invested,
+    contributions,
+    finalValue,
+    withdrawnNet: withdrawn,
+    wealth,
+    totalReturnIncl: wealth / invested - 1,
+    holdingsReturn: finalValue / invested - 1,
+    cagr: yrs > 0 ? Math.pow(wealth / invested, 1 / yrs) - 1 : 0,
+    mdd,
+    mddHoldings: mddH,
+    costDrag: totalCost,
+    rebalCount,
+    dcaBuyCount: dcaCount,
+    reinvestCount,
+    taxRates,
+    dividends: {
+      months: monthList,
+      years,
+      ttm,
+      byCode,
+      totalGross: eventsLog.reduce((s, r) => s + r.gross, 0),
+      totalTax: eventsLog.reduce((s, r) => s + r.tax, 0),
+      totalNet: eventsLog.reduce((s, r) => s + r.net, 0),
+      events: eventsLog,
+    },
+    curve,
+  };
+}
+
+// ---- Dividend mode UI (data load + render). Strings: 과거 기준 톤, 권유·서열 표현 금지(reviewer 금지어 lint). ----
+const DIV_PRESETS = {
+  divSample: {
+    label: "배당 포트폴리오(예시)",
+    w: { SCHD: 35, VIG: 20, BND: 25, "161510": 20 },
+    rebalance: "Y",
+    mode: "cash",
+    note: "커버드콜 제외 예시 조합(미국 직투 3종 + 국내상장 1종) · 권유 아님 · 공통 기간 2012-08~",
+  },
+  schdVsKr: {
+    label: "SCHD 직투 vs 국내상장",
+    compare: [
+      { label: "SCHD (직투)", w: { SCHD: 100 } },
+      { label: "SOL 미국배당다우존스", w: { "446720": 100 } },
+      { label: "TIGER 미국배당다우존스", w: { "458730": 100 } },
+      { label: "ACE 미국배당다우존스", w: { "402970": 100 } },
+    ],
+    start: "2023-08-01",
+    rebalance: "N",
+    mode: "cash",
+    note: "같은 지수(다우존스 미국 배당100) 추종 비교 · ACE가 이 지수로 바뀐 2023-08부터 공통 · KODEX(489250)는 2024-08 상장이라 제외",
+  },
+};
+const DIV_GROUPS = [
+  ["KR", "국내상장 배당"],
+  ["US", "해외 직투 비교"],
+  ["ALL", "전체"],
+];
+const DIV_SAME_INDEX_KR = ["446720", "458730", "402970", "489250"];
+
+const divState = {
+  meta: null,
+  data: { meta: {}, prices: {}, basis: {}, div: {}, fx: null },
+  sel: {},
+  group: "KR",
+  mode: "cash",
+  taxView: "after",
+  preset: null,
+  last: null,
+  charts: [],
+  booted: false,
+};
+
+async function divLoadMeta() {
+  if (divState.meta) return divState.meta;
+  const res = await fetch("./data/div_meta.json");
+  if (!res.ok) throw new Error("data/div_meta.json 을 불러오지 못했습니다.");
+  divState.meta = await res.json();
+  return divState.meta;
+}
+
+function divEtf(code) {
+  return (divState.meta?.etfs || []).find((e) => e.code === code) || null;
+}
+
+async function divEnsureData(codes) {
+  const D = divState.data;
+  const need = codes.filter((c) => !D.prices[c]);
+  await Promise.all(
+    need.map(async (c) => {
+      const m = divEtf(c);
+      if (!m) throw new Error(`배당 모드 미지원 종목: ${c}`);
+      const [pr, dr] = await Promise.all([fetch("./" + m.priceFile), fetch("./" + m.divFile)]);
+      if (!pr.ok || !dr.ok) throw new Error(`${c} 데이터 파일을 불러오지 못했습니다.`);
+      const pj = await pr.json();
+      const dj = await dr.json();
+      D.meta[c] = m;
+      D.basis[c] = pj.priceBasis;
+      D.prices[c] = Object.fromEntries(pj.rows.map((r) => [r[0], r[1]]));
+      D.div[c] = dj;
+    })
+  );
+  if (!D.fx && codes.some((c) => divEtf(c)?.market === "US")) {
+    const res = await fetch("./" + (divState.meta.fx?.file || "data/fx/USDKRW.json"));
+    if (!res.ok) throw new Error("USDKRW 환율 파일을 불러오지 못했습니다.");
+    const fj = await res.json();
+    D.fx = fj.rows.map((r) => [r[0], r[1]]);
+  }
+}
+
+function divBadges(e) {
+  let h = "";
+  if (e.market === "US") h += `<span class="etf-badge us">미국 직투</span>`;
+  if (e.coveredCall) h += `<span class="etf-badge cc" title="분배금에 옵션 프리미엄·원금 성격 포함 가능">커버드콜</span>`;
+  if (e.gaps && e.gaps.length) h += `<span class="etf-badge unv" title="미확인 구간 있음">미확인 ${e.gaps.length}</span>`;
+  return h ? `<span class="etf-badges">${h}</span>` : "";
+}
+
+function divRenderGroupTabs() {
+  const box = $("#divGroupTabs");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const [k, label] of DIV_GROUPS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (divState.group === k ? " active" : "");
+    b.textContent = label;
+    b.setAttribute("role", "tab");
+    b.onclick = () => {
+      divState.group = k;
+      divRenderGroupTabs();
+      divRenderList();
+    };
+    box.appendChild(b);
+  }
+}
+
+function divRenderPresets() {
+  const box = $("#divPresets");
+  if (!box) return;
+  box.innerHTML = "";
+  for (const [k, p] of Object.entries(DIV_PRESETS)) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (divState.preset === k ? " active" : "");
+    b.dataset.key = k;
+    b.textContent = p.label;
+    b.title = p.note || "";
+    b.onclick = () => divApplyPreset(k);
+    box.appendChild(b);
+  }
+}
+
+function divRenderList() {
+  const box = $("#divEtfList");
+  if (!box || !divState.meta) return;
+  box.innerHTML = "";
+  const list = divState.meta.etfs.filter((e) => divState.group === "ALL" || e.market === divState.group);
+  for (const e of list) {
+    const on = e.code in divState.sel;
+    const el = document.createElement("div");
+    el.className = "etf" + (on ? " on" : "");
+    el.setAttribute("data-div-etf", e.code);
+    const freq = { M: "월", Q: "분기", S: "반기", A: "연" }[e.frequency] || e.frequency;
+    const vf = e.validFrom ? ` · 지수 기준 ${e.validFrom.slice(0, 7)}~` : "";
+    el.innerHTML = `<div class="etf-head"><input type="checkbox" ${on ? "checked" : ""} aria-label="${e.code} 선택" /><div><div class="etf-name">${e.name}${divBadges(e)}</div><div class="etf-code">${e.code} · ${e.group} · ${freq}분배 · ${e.start}~${vf}</div></div><span class="cat">${e.category}</span></div><div class="weight-row" style="${on ? "" : "display:none"}"><input type="range" min="0" max="100" value="${divState.sel[e.code] || 0}" /><div class="wnum">${divState.sel[e.code] || 0}%</div></div>`;
+    el.querySelector("input[type=checkbox]").onchange = (ev) => {
+      if (ev.target.checked) divState.sel[e.code] = 10;
+      else delete divState.sel[e.code];
+      divState.preset = null;
+      divRenderPresets();
+      divRenderList();
+    };
+    el.querySelector("input[type=range]").oninput = (ev) => {
+      const w = Number(ev.target.value);
+      if (w <= 0) delete divState.sel[e.code];
+      else divState.sel[e.code] = w;
+      el.querySelector(".wnum").textContent = w + "%";
+      divState.preset = null;
+      divUpdateSum();
+    };
+    box.appendChild(el);
+  }
+  divUpdateSum();
+}
+
+function divUpdateSum() {
+  const s = Object.values(divState.sel).reduce((a, b) => a + b, 0);
+  const n = Object.keys(divState.sel).length;
+  const el = $("#divSum");
+  if (el) el.textContent = `선택 ${n}종 · 비중 합 ${s}%`;
+}
+
+function divReadControls() {
+  divState.mode = document.querySelector("input[name=divMode]:checked")?.value === "reinvest" ? "reinvest" : "cash";
+  divState.taxView = document.querySelector("input[name=divTaxView]:checked")?.value === "pre" ? "pre" : "after";
+  return {
+    period: $("#divPeriod")?.value || "max",
+    rebalance: $("#divRebalance")?.value || "N",
+    start: $("#divStart")?.value || "",
+    end: $("#divEnd")?.value || "",
+    bandOn: !!$("#divBandOn")?.checked,
+    bandPct: Math.max(1, Math.min(10, Number($("#divBandPct")?.value) || 5)) / 100,
+    initial: Math.max(10000, Number($("#divInitial")?.value) || 100000000),
+    monthly: Math.max(0, Number($("#divMonthly")?.value) || 0),
+  };
+}
+
+function divWindow(codes, ctl, forcedStart) {
+  const ends = codes.map((c) => divEtf(c)?.end || "2099-12-31").sort();
+  const lastEnd = ends[0];
+  let start = "2000-01-01",
+    end = "2099-12-31";
+  if (ctl.period === "custom") {
+    if (ctl.start) start = ctl.start;
+    if (ctl.end) end = ctl.end;
+  } else if (ctl.period !== "max") {
+    const n = { "10y": 10, "5y": 5, "3y": 3, "1y": 1 }[ctl.period] || 0;
+    start = `${Number(lastEnd.slice(0, 4)) - n}${lastEnd.slice(4)}`;
+  }
+  if (forcedStart && forcedStart > start) start = forcedStart;
+  return { start, end };
+}
+
+function divSetRadio(name, v) {
+  const el = document.querySelector(`input[name=${name}][value=${v}]`);
+  if (el) el.checked = true;
+}
+
+async function divApplyPreset(key) {
+  const p = DIV_PRESETS[key];
+  if (!p) return;
+  divState.preset = key;
+  const first = p.compare ? p.compare[0].w : p.w;
+  divState.sel = { ...first };
+  if (p.compare) divState.group = "ALL";
+  else if (Object.keys(p.w).some((c) => divEtf(c)?.market === "US")) divState.group = "ALL";
+  const rb = $("#divRebalance");
+  if (rb) rb.value = p.rebalance || "N";
+  divSetRadio("divMode", p.mode || "cash");
+  divRenderPresets();
+  divRenderGroupTabs();
+  divRenderList();
+  await divRun();
+}
+
+async function divRun() {
+  const host = $("#divResult");
+  try {
+    await divLoadMeta();
+    const ctl = divReadControls();
+    const p = divState.preset ? DIV_PRESETS[divState.preset] : null;
+    const opts = { mode: divState.mode, bandOn: ctl.bandOn, bandPct: ctl.bandPct, cost: clampTradeCost(state.tradeCost) };
+    if (p && p.compare) {
+      const codes = [...new Set(p.compare.flatMap((l) => Object.keys(l.w)))];
+      await divEnsureData(codes);
+      // common window across ALL legs (same dates for a fair side-by-side)
+      const firsts = codes.map((c) => divEtf(c).start).sort();
+      const win = divWindow(codes, ctl, [p.start || "", firsts[firsts.length - 1]].sort()[1]);
+      const runLegs = (s0, e0) =>
+        p.compare.map((l) => ({
+          label: l.label,
+          w: l.w,
+          r: backtestDividend(l.w, divState.data, s0, e0, ctl.rebalance, ctl.initial, ctl.monthly, opts),
+        }));
+      let legs = runLegs(win.start, win.end);
+      // align every leg to the same first/last date (KR/US holidays and data gaps differ)
+      const okL = legs.filter((l) => !l.r.error);
+      if (okL.length) {
+        const s1 = okL.map((l) => l.r.start).sort().at(-1);
+        const e1 = okL.map((l) => l.r.end).sort()[0];
+        if (okL.some((l) => l.r.start !== s1 || l.r.end !== e1)) legs = runLegs(s1, e1);
+      }
+      divState.last = { compare: true, legs, preset: p, ctl };
+      divRenderCompare(host, legs, p, ctl);
+      return;
+    }
+    const codes = Object.keys(divState.sel).filter((c) => divState.sel[c] > 0);
+    if (!codes.length) {
+      host.innerHTML = `<div class="card pad empty">종목을 선택하세요.</div>`;
+      return;
+    }
+    await divEnsureData(codes);
+    const win = divWindow(codes, ctl, null);
+    const r = backtestDividend({ ...divState.sel }, divState.data, win.start, win.end, ctl.rebalance, ctl.initial, ctl.monthly, opts);
+    divState.last = { compare: false, r, ctl };
+    if (r.error) {
+      host.innerHTML = `<div class="card pad empty">${r.error}</div>`;
+      return;
+    }
+    divRenderSingle(host, r, ctl);
+  } catch (e) {
+    console.warn(e);
+    host.innerHTML = `<div class="card pad empty">배당 데이터 오류: ${e.message || e}</div>`;
+  }
+}
+
+function divDestroyCharts() {
+  for (const c of divState.charts) {
+    try {
+      c.destroy();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  divState.charts = [];
+}
+
+function divHatch(color) {
+  const cv = document.createElement("canvas");
+  cv.width = 8;
+  cv.height = 8;
+  const g = cv.getContext("2d");
+  if (!g) return color;
+  g.strokeStyle = color;
+  g.lineWidth = 2;
+  g.beginPath();
+  g.moveTo(0, 8);
+  g.lineTo(8, 0);
+  g.stroke();
+  return g.createPattern(cv, "repeat");
+}
+
+function divMonthVal(m, view) {
+  return view === "pre" ? m.gross : m.net;
+}
+
+function divStatusLabel(st) {
+  return { ok: "", no_data: "데이터 없음", partial: "일부 종목 데이터 없음", unverified: "미확인 포함" }[st] || st;
+}
+
+function divMonthlyChart(canvas, series, view) {
+  // series: [{label, months, color}] — 0 = 확인된 무분배, 회색 = 데이터 없음, 빗금 = 미확인
+  if (typeof Chart === "undefined" || !canvas) return null;
+  const labels = series[0].months.map((m) => m.ym);
+  let max = 0;
+  for (const s of series) for (const m of s.months) max = Math.max(max, divMonthVal(m, view));
+  const stub = max > 0 ? max * 0.06 : 1;
+  const ds = [];
+  const single = series.length === 1;
+  series.forEach((s, i) => {
+    ds.push({
+      label: single ? (view === "pre" ? "세전 분배금" : "세후 분배금") : s.label,
+      data: s.months.map((m) => (m.status === "no_data" ? 0 : divMonthVal(m, view))),
+      backgroundColor: s.color,
+      stack: single ? "a" : "s" + i,
+      _kind: "val",
+    });
+    ds.push({
+      label: single ? "미확인(0 아님)" : `${s.label} 미확인`,
+      data: s.months.map((m) => (m.status === "unverified" || m.status === "partial" ? stub : 0)),
+      backgroundColor: divHatch("#f0c27a"),
+      borderColor: "#f0c27a",
+      borderWidth: 1,
+      stack: single ? "a" : "s" + i,
+      _kind: "unv",
+    });
+    ds.push({
+      label: single ? "데이터 없음" : `${s.label} 데이터 없음`,
+      data: s.months.map((m) => (m.status === "no_data" ? stub : 0)),
+      backgroundColor: "#4a5563",
+      stack: single ? "a" : "s" + i,
+      _kind: "nodata",
+    });
+  });
+  return new Chart(canvas, {
+    type: "bar",
+    data: { labels, datasets: ds },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: {
+        legend: {
+          labels: { color: "#8b9aab", boxWidth: 12, filter: (it, data) => data.datasets[it.datasetIndex]._kind === "val" || single },
+        },
+        tooltip: {
+          filter: (it) => it.raw > 0,
+          callbacks: {
+            label: (it) => {
+              const d = it.dataset;
+              const s = series[single ? 0 : Math.floor(it.datasetIndex / 3)];
+              const m = s.months[it.dataIndex];
+              if (d._kind === "nodata") return `${s.label}: 데이터 없음`;
+              if (d._kind === "unv") return `${s.label}: ${divStatusLabel(m.status)} ${(m.unverified || m.noData || []).join(",")}`;
+              return `${d.label}: ${won(it.raw)}${m.inc ? " (부분 월)" : ""}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: "#667687", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
+        y: { stacked: true, ticks: { color: "#667687", callback: (v) => (v >= 1e4 ? Math.round(v / 1e4).toLocaleString("ko-KR") + "만" : v) }, grid: { color: "rgba(255,255,255,.05)" } },
+      },
+    },
+  });
+}
+
+function divFmtPct(x) {
+  return x == null || Number.isNaN(x) ? "—" : pct(x, 1);
+}
+
+function divYearsTable(r) {
+  const anyUs = r.codes.some((c) => divEtf(c)?.market === "US");
+  const rows = r.dividends.years
+    .slice()
+    .reverse()
+    .map((y) => {
+      const flags = [];
+      if (y.partial) flags.push("부분 연도");
+      if (y.status === "unverified") flags.push("미확인 포함");
+      if (y.status === "partial") flags.push("데이터 없음 포함");
+      if (y.gross > 20000000) flags.push("세전 2,000만원 초과");
+      const fx = anyUs
+        ? `<td class="num">${divFmtPct(y.growthUsdPct)}</td><td class="num">${divFmtPct(y.fxEffectPct)}</td><td class="num">${divFmtPct(y.growthKrwPct)}</td>`
+        : "";
+      return `<tr><td>${y.y}</td><td class="num">${won(y.gross)}</td><td class="num">${won(y.tax)}</td><td class="num">${won(y.net)}</td><td class="num">${y.count}</td>${fx}<td>${flags.join(" · ")}</td></tr>`;
+    })
+    .join("");
+  const fxHead = anyUs ? `<th class="num">달러 증감</th><th class="num">환율 효과</th><th class="num">원화 증감</th>` : "";
+  const fxNote = anyUs
+    ? `<div class="warn">미국 직투분: (1+원화 증감) = (1+달러 증감) × (1+환율 효과). 환율 효과 = 분배금 가중 평균 환율의 전년 대비 변화. 달러 증감에는 보유 수량 변화(재투자·적립) 포함. 부분 연도는 증감 생략.</div>`
+    : "";
+  return `<div class="card pad"><div class="section-title">연도별 분배금 합계 (배당락일 기준 집계)</div><div class="table-scroll"><table class="div-table"><thead><tr><th>연도</th><th class="num">세전</th><th class="num">세금</th><th class="num">세후</th><th class="num">건수</th>${fxHead}<th>비고</th></tr></thead><tbody>${rows}</tbody></table></div>${fxNote}</div>`;
+}
+
+function divByCodeTable(r) {
+  const rows = r.codes
+    .map((c) => {
+      const e = divEtf(c) || {};
+      const b = r.dividends.byCode[c] || { gross: 0, tax: 0, net: 0, count: 0 };
+      const rate = e.taxProfile === "US_DIRECT" ? r.taxRates.US_DIRECT : r.taxRates.KR_LISTED;
+      const gaps = (e.gaps || []).map((g) => (g.from === g.to ? g.from : `${g.from}~${g.to}`)).join(", ");
+      const d = divState.data.div[c] || {};
+      const src = (d.sources || []).join("/");
+      return `<tr><td>${e.name || c}<div class="etf-code">${c}${e.coveredCall ? " · 커버드콜" : ""}</div></td><td class="num">${(r.weights[c] * 100).toFixed(0)}%</td><td class="num">${b.count}</td><td class="num">${won(b.gross)}</td><td class="num">${won(b.tax)} (${(rate * 100).toFixed(1)}%)</td><td class="num">${won(b.net)}</td><td>${src}<div class="etf-code">범위 ${d.coverage?.from || "?"}~${d.coverage?.to || "?"}${gaps ? " · 미확인 " + gaps : ""}</div></td></tr>`;
+    })
+    .join("");
+  return `<div class="card pad"><div class="section-title">종목별 분배금 (기간 합계)</div><div class="table-scroll"><table class="div-table"><thead><tr><th>종목</th><th class="num">비중</th><th class="num">건수</th><th class="num">세전</th><th class="num">세금</th><th class="num">세후</th><th>출처 · 데이터 범위</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+function divNotes(codes, r) {
+  const notes = [
+    "배당락일 기준 집계: 분배금은 배당락일이 속한 달로 묶었습니다(실제 지급일은 보통 미국 3–5일, 국내 1–5일 뒤).",
+    "일반계좌 가정 · ISA·연금계좌 미반영. 미국 직투 분배금은 미국 원천징수 15%만 반영(국내 배당소득세율 14% < 15%라 추가 징수 없음 가정), 국내상장 ETF 분배금은 15.4% 단순 적용.",
+    "2025.1부터 국내상장 해외 ETF는 외국납부세액을 펀드 단계 환급 대신 투자자 원천징수 단계에서 차감하는 방식으로 바뀌었습니다. 일반계좌 결과는 대체로 비슷하지만 실제 세액은 ETF별 외국납부세액·주당 과세표준액 기준으로 달라질 수 있습니다.",
+    "매매차익 세금은 이 시뮬에 반영하지 않았습니다: 해외 직투는 연 250만원 기본공제 후 양도소득세 22%, 국내상장 해외형은 매매차익(과표 기준)에 배당소득세 15.4%, 국내주식형은 매매차익 비과세.",
+    "연간 금융소득(이자+배당)이 2,000만원을 넘으면 금융소득종합과세 대상입니다(이 시뮬은 계산하지 않고 안내만).",
+    "환율: 배당락일 전 영업일 USDKRW(FRED DEXKOUS, 최근분 Yahoo 보완)로 원화 환산, 평가도 전일 환율(룩어헤드 없음). 환전 수수료·정수 주·지급 시차는 반영하지 않았습니다.",
+    "막대 0 = 데이터 범위 안에서 확인된 무분배 달, 회색 = 데이터 없음, 빗금 = 미확인(정기 일정상 있어야 하나 소스 간 확인 불가 — 0으로 채우지 않음).",
+    r.mode === "cash"
+      ? "인출 모드: 세후 분배금은 배당락일에 포트폴리오에서 빠져 현금으로 쌓입니다(이자 없음). 총수익률 = (기말 평가액 + 누적 세후 분배금) ÷ 투입 원금 − 1. MDD는 평가액+누적 분배금 기준."
+      : "재투자 모드: 세후 분배금으로 배당락일(반영일) 종가에 같은 종목을 추가 매수합니다(비용 0.5×금액×거래비용률).",
+  ];
+  if (codes.some((c) => divEtf(c)?.coveredCall))
+    notes.push("커버드콜(JEPI·JEPQ·KODEX 미국배당커버드콜액티브) 분배금에는 옵션 프리미엄·원금 성격이 포함될 수 있어 분배 규모가 총수익을 뜻하지 않습니다.");
+  if (codes.includes("SCHD") || codes.some((c) => DIV_SAME_INDEX_KR.includes(c)))
+    notes.push("SCHD(직투)와 SOL·TIGER·ACE·KODEX 미국배당다우존스는 같은 지수를 추종하지만 공통 기간이 짧습니다: SOL 2022-11~, TIGER 2023-06~, ACE는 2023-08부터 이 지수(이전 S&P 미국고배당), KODEX 2024-08~. 공통 비교는 2023-08 이후(KODEX 포함 시 2024-09 이후)만 의미가 있고, 짧은 기간 결과를 일반화하기 어렵습니다.");
+  if (codes.includes("402970") && r.start < "2023-08-01")
+    notes.push("ACE 미국배당다우존스(402970)는 2023-07까지 다른 지수(S&P 미국고배당)를 추종했습니다 — 이 구간은 다우존스 배당100 비교로 부적합합니다.");
+  const unv = codes.filter((c) => (divEtf(c)?.gaps || []).length);
+  if (unv.length) notes.push(`미확인 구간이 있는 종목: ${unv.map((c) => `${c}(${divEtf(c).gaps.map((g) => (g.from === g.to ? g.from : g.from + "~" + g.to)).join(", ")})`).join(" · ")}.`);
+  return `<div class="card pad"><div class="section-title">세금 · 데이터 가정 (각주)</div><ul class="div-notes">${notes.map((n) => `<li>${n}</li>`).join("")}</ul><div class="warn">과거 시뮬 · 투자 자문 아님 · 과거 분배금은 미래 분배금을 보장하지 않습니다.</div></div>`;
+}
+
+function divKpis(r, view) {
+  const t = r.dividends.ttm;
+  const avg = view === "pre" ? t.monthlyAvgGross : t.monthlyAvg;
+  const tot = view === "pre" ? t.gross : t.net;
+  const tag = view === "pre" ? "세전" : "세후";
+  const ttmFlag = t.short ? " · 기간이 12개월 미만" : t.flags.length ? " · " + t.flags.map(divStatusLabel).join("/") : "";
+  const k = (label, val, sub, klass = "") => `<div class="card kpi"><div class="label">${label}</div><div class="val ${klass}">${val}</div><div class="sub2">${sub}</div></div>`;
+  return `<div class="kpis div-kpis">${k(
+    `TTM 월평균(${tag})`,
+    won(avg),
+    `월평균 = TTM÷12 · 과거 기준 월 ${won(avg)} 수준이었다${ttmFlag}`
+  )}${k(`TTM 합계(${tag})`, won(tot), `최근 완결 12개월 ${t.from}~${t.to}(배당락월 기준) · ${t.count}건`)}${k(
+    "누적 분배금(세후)",
+    won(r.dividends.totalNet),
+    `세전 ${won(r.dividends.totalGross)} · 세금 ${won(r.dividends.totalTax)}`
+  )}${k("총수익률(분배 포함)", pct(r.totalReturnIncl, 1), `연환산 ${pct(r.cagr, 2)} · 가격만 ${pct(r.holdingsReturn, 1)}`, cls(r.totalReturnIncl))}${k(
+    "MDD",
+    pct(r.mdd, 1),
+    r.mode === "cash" ? `평가액+누적 분배금 기준 · 평가액만 ${pct(r.mddHoldings, 1)}` : "평가액 기준(재투자)",
+    "neg"
+  )}${k("기말 평가액", won(r.finalValue), `투입 ${won(r.invested)}${r.mode === "cash" ? ` · 인출 누적 ${won(r.withdrawnNet)}` : ""}`)}</div>`;
+}
+
+function divRenderSingle(host, r, ctl) {
+  divDestroyCharts();
+  const view = divState.taxView;
+  const modeLabel = r.mode === "cash" ? "인출" : "재투자";
+  const rbl = { Q: "분기", Y: "연 1회", M: "매월", N: "없음" }[r.rebalance];
+  const port = r.codes.map((c) => `${divEtf(c)?.name || c} ${(r.weights[c] * 100).toFixed(0)}%`).join(" · ");
+  const p = divState.preset ? DIV_PRESETS[divState.preset] : null;
+  host.innerHTML = `<div class="card pad div-head"><div class="section-title">분배금 흐름 · 과거 시뮬 (원가격 + 실제 분배금)</div><div class="div-port">${port}</div><div class="muted-note" style="margin:6px 0 0">기간 ${r.start} ~ ${r.end} · ${r.years.toFixed(1)}년 · 분배금 ${modeLabel} · 리밸런싱 ${rbl} · 시작 ${won(r.initial)}${r.monthly > 0 ? ` + 매월 ${won(r.monthly)}` : ""}${p ? " · " + p.note : ""}</div></div>${divKpis(
+    r,
+    view
+  )}<div class="card chart-wrap div-chart"><div class="chart-title">월별 분배금 (${view === "pre" ? "세전" : "세후"} · 배당락일 기준 집계)</div><div class="chart-box"><canvas id="divMonthlyChart"></canvas></div><div class="div-legend"><span><i class="lg-val"></i>분배금</span><span><i class="lg-unver"></i>미확인·일부 데이터 없음(0 아님)</span><span><i class="lg-nodata"></i>데이터 없음</span><span>막대 없음 = 확인된 무분배</span></div></div>${divYearsTable(r)}${divByCodeTable(r)}${divNotes(r.codes, r)}`;
+  const ch = divMonthlyChart($("#divMonthlyChart"), [{ label: "포트폴리오", months: r.dividends.months, color: "#7dd3c0" }], view);
+  if (ch) divState.charts.push(ch);
+}
+
+function divRenderCompare(host, legs, p, ctl) {
+  divDestroyCharts();
+  const view = divState.taxView;
+  const ok = legs.filter((l) => !l.r.error);
+  if (!ok.length) {
+    host.innerHTML = `<div class="card pad empty">${legs[0].r.error}</div>`;
+    return;
+  }
+  const r0 = ok[0].r;
+  const colors = ["#7dd3c0", "#f0c27a", "#9ecbff", "#ff9fb0"];
+  const tag = view === "pre" ? "세전" : "세후";
+  const cell = (l, f) => (l.r.error ? `<td>${l.r.error}</td>` : `<td class="num">${f(l.r)}</td>`);
+  const row = (name, f) => `<tr><td>${name}</td>${legs.map((l) => cell(l, f)).join("")}</tr>`;
+  const tbl = `<div class="table-scroll"><table class="div-table"><thead><tr><th>과거 기준</th>${legs.map((l, i) => `<th class="num"><i class="lg-dot" style="background:${colors[i]}"></i>${l.label}</th>`).join("")}</tr></thead><tbody>${[
+    row(`TTM 월평균(${tag}) · 월평균 = TTM÷12`, (r) => won(view === "pre" ? r.dividends.ttm.monthlyAvgGross : r.dividends.ttm.monthlyAvg)),
+    row(`TTM 합계(${tag})`, (r) => won(view === "pre" ? r.dividends.ttm.gross : r.dividends.ttm.net)),
+    row("누적 분배금(세후)", (r) => won(r.dividends.totalNet)),
+    row("세율(일반계좌 가정)", (r) => (divEtf(r.codes[0])?.taxProfile === "US_DIRECT" ? "15% (미국 원천)" : "15.4%")),
+    row("총수익률(분배 포함)", (r) => pct(r.totalReturnIncl, 1)),
+    row("가격만 수익률", (r) => pct(r.holdingsReturn, 1)),
+    row("연환산", (r) => pct(r.cagr, 2)),
+    row("MDD", (r) => pct(r.mdd, 1)),
+  ].join("")}</tbody></table></div>`;
+  host.innerHTML = `<div class="card pad div-head"><div class="section-title">${p.label} · 과거 시뮬 (같은 기간 나란히)</div><div class="muted-note" style="margin:6px 0 0">공통 기간 ${r0.start} ~ ${r0.end} · ${r0.years.toFixed(1)}년 · 각 ${won(ctl.initial)} 일괄 · 분배금 ${r0.mode === "cash" ? "인출" : "재투자"} · ${p.note}. 우열 판단용이 아니며 기간이 짧습니다.</div>${tbl}</div><div class="card chart-wrap div-chart"><div class="chart-title">월별 분배금 (${tag} · 배당락일 기준 집계)</div><div class="chart-box"><canvas id="divMonthlyChart"></canvas></div><div class="div-legend"><span><i class="lg-unver"></i>미확인(0 아님)</span><span><i class="lg-nodata"></i>데이터 없음</span></div></div>${ok
+    .map((l) => divYearsTable(l.r).replace("연도별 분배금 합계 (배당락일 기준 집계)", `연도별 분배금 합계 · ${l.label} (배당락일 기준 집계)`))
+    .join("")}${divNotes([...new Set(ok.flatMap((l) => l.r.codes))], r0)}`;
+  const ch = divMonthlyChart(
+    $("#divMonthlyChart"),
+    ok.map((l) => ({ label: l.label, months: l.r.dividends.months, color: colors[legs.indexOf(l)] })),
+    view
+  );
+  if (ch) divState.charts.push(ch);
+}
+
+async function divShowMode(mode) {
+  const isDiv = mode === "div";
+  const pl = $("#priceLayout"),
+    dl = $("#divLayout");
+  if (!pl || !dl) return;
+  pl.hidden = isDiv;
+  dl.hidden = !isDiv;
+  const bp = $("#modePrice"),
+    bd = $("#modeDiv");
+  bp?.classList.toggle("active", !isDiv);
+  bd?.classList.toggle("active", isDiv);
+  bp?.setAttribute("aria-selected", String(!isDiv));
+  bd?.setAttribute("aria-selected", String(isDiv));
+  if (isDiv && !divState.booted) {
+    divState.booted = true;
+    try {
+      const m = await divLoadMeta();
+      const note = $("#divDataNote");
+      if (note)
+        note.textContent = `배당 데이터 생성 ${m.generatedAt} · 환율 ${m.fx.from}~${m.fx.to} (FRED ~${m.fx.fredLast}, 이후 Yahoo). 국내 분배금 = KRX KIND 공시, 미국 = 발행사·Nasdaq·stockanalysis·Yahoo 대조.`;
+      divRenderPresets();
+      divRenderGroupTabs();
+      divRenderList();
+    } catch (e) {
+      $("#divResult").innerHTML = `<div class="card pad empty">배당 데이터 오류: ${e.message || e}</div>`;
+    }
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const bp = $("#modePrice"),
+    bd = $("#modeDiv");
+  if (!bp || !bd) return;
+  bp.onclick = () => divShowMode("price");
+  bd.onclick = () => divShowMode("div");
+  const per = $("#divPeriod");
+  if (per) per.onchange = () => ($("#divCustomRow").hidden = per.value !== "custom");
+  $("#divRun").onclick = () => divRun();
+  $("#divClear").onclick = () => {
+    divState.sel = {};
+    divState.preset = null;
+    divRenderPresets();
+    divRenderList();
+  };
+  document.querySelectorAll("input[name=divTaxView]").forEach((el) => {
+    el.onchange = () => {
+      divReadControls();
+      const L = divState.last;
+      if (!L) return;
+      if (L.compare) divRenderCompare($("#divResult"), L.legs, L.preset, L.ctl);
+      else if (!L.r.error) divRenderSingle($("#divResult"), L.r, L.ctl);
+    };
+  });
+  document.querySelectorAll("input[name=divMode]").forEach((el) => {
+    el.onchange = () => divState.last && divRun();
+  });
+  // #div or #div=<presetKey> opens dividend mode directly
+  const m = /(?:^#|[#&])div(?:=([A-Za-z0-9_]+))?(?:&|$)/.exec(location.hash || "");
+  if (m) {
+    divShowMode("div").then(() => {
+      if (m[1] && DIV_PRESETS[m[1]]) divApplyPreset(m[1]);
+    });
+  }
 });

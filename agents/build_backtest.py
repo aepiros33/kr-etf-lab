@@ -1735,6 +1735,396 @@ def start_date_sensitivity(
     }
 
 
+# ---------------------------------------------------------------------------
+# Dividend (distribution cash-flow) mode — v1
+# Separate engine: the price-return engine above is untouched (dividend-off outputs
+# stay byte-identical). Uses ONLY raw price series (US: split-adjusted, dividends NOT
+# adjusted; KR: raw .KS close) + real distribution events. Adjusted prices + events
+# would double count → load_dividend_data refuses any other priceBasis.
+# Daily order: MTM (US × previous-day FX) → distributions (units held at previous close,
+# prev < ex ≤ d, FX strictly before ex, tax 15% US_DIRECT / 15.4% KR_LISTED) →
+# cash: withdraw net to a ledger | reinvest: buy same ticker at close (cost 0.5×net×rate)
+# → DCA (existing rule) → band → full rebalance (existing rule, fixed weights only).
+# ---------------------------------------------------------------------------
+DIV_META = DATA / "div_meta.json"
+DIV_TAX_RATES = {"US_DIRECT": 0.15, "KR_LISTED": 0.154}
+DIV_ALLOWED_BASIS = ("raw", "raw_split_adjusted")
+DIV_REBAL_MODES = ("Q", "Y", "M", "N")
+
+
+def load_dividend_data(codes: list[str] | None = None) -> dict:
+    """Load raw prices + dividend events + USDKRW for dividend mode (never data/prices)."""
+    meta = json.loads(DIV_META.read_text(encoding="utf-8"))
+    etfs = {e["code"]: e for e in meta["etfs"]}
+    want = list(codes) if codes else list(etfs)
+    out = {"meta": {}, "prices": {}, "basis": {}, "div": {}, "fx": None}
+    need_fx = False
+    for c in want:
+        m = etfs.get(c)
+        if m is None:
+            raise KeyError(f"배당 모드 미지원 종목: {c}")
+        pj = json.loads((ROOT / m["priceFile"]).read_text(encoding="utf-8"))
+        dj = json.loads((ROOT / m["divFile"]).read_text(encoding="utf-8"))
+        out["meta"][c] = m
+        out["basis"][c] = pj.get("priceBasis")
+        out["prices"][c] = {r[0]: r[1] for r in pj["rows"]}
+        out["div"][c] = dj
+        if m.get("market") == "US":
+            need_fx = True
+    if need_fx:
+        fj = json.loads((DATA / "fx" / "USDKRW.json").read_text(encoding="utf-8"))
+        out["fx"] = [(r[0], r[1]) for r in fj["rows"]]
+    return out
+
+
+def _div_fx_asof(fx_dates: list[str], fx_vals: list[float], d: str):
+    """Last USDKRW strictly before d (previous-day FX, no look-ahead)."""
+    import bisect
+
+    i = bisect.bisect_left(fx_dates, d) - 1
+    return fx_vals[i] if i >= 0 else None
+
+
+def _div_minus_days(d: str, n: int) -> str:
+    from datetime import date, timedelta
+
+    return (date.fromisoformat(d) - timedelta(days=n)).isoformat()
+
+
+def _div_months(a: str, b: str) -> list[str]:
+    y, m = int(a[:4]), int(a[5:7])
+    ey, em = int(b[:4]), int(b[5:7])
+    out = []
+    while (y, m) <= (ey, em):
+        out.append(f"{y:04d}-{m:02d}")
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+    return out
+
+
+def _div_edge_weekday(ym: str, last: bool) -> str:
+    from datetime import date, timedelta
+
+    y, m = int(ym[:4]), int(ym[5:7])
+    if last:
+        d = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1))
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+    else:
+        d = date(y, m, 1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+    return d.isoformat()
+
+
+def _div_shift_ym(ym: str, k: int) -> str:
+    n = int(ym[:4]) * 12 + int(ym[5:7]) - 1 + k
+    return f"{n // 12:04d}-{n % 12 + 1:02d}"
+
+
+def _div_in_ranges(ym: str, ranges: list[dict]) -> bool:
+    return any(g["from"] <= ym <= g["to"] for g in ranges or [])
+
+
+def backtest_dividend(
+    weights: dict[str, float],
+    data: dict,
+    start: str = "2000-01-01",
+    end: str = "2099-12-31",
+    rebalance: str = "N",
+    initial_capital: float = 1.0,
+    monthly_contribution: float = 0.0,
+    opts: dict | None = None,
+) -> dict:
+    opts = opts or {}
+    mode = "reinvest" if opts.get("mode") == "reinvest" else "cash"
+    cost = _clamp_trade_cost(opts.get("cost"))
+    tax_rates = dict(DIV_TAX_RATES)
+    tax_rates.update(opts.get("taxRates") or {})
+    band_on = bool(opts.get("bandOn"))
+    band_pct = _clamp_band_pct(opts.get("bandPct")) if band_on else 0.0
+    codes = [c for c in weights if weights[c] > 0]
+    if not codes:
+        return {"error": "ETF를 선택하세요."}
+    if rebalance not in DIV_REBAL_MODES:
+        return {"error": "배당 모드는 고정 비중(분기·연·매월·없음)만 지원합니다."}
+    for c in codes:
+        if c not in data["prices"]:
+            return {"error": f"{c} 원가격 시세가 없습니다."}
+        if data["basis"].get(c) not in DIV_ALLOWED_BASIS:
+            return {"error": f"{c}: 배당 모드는 원가격(분배 미조정) 시계열만 허용합니다(수정주가+분배금 이중계산 방지)."}
+    total_w = sum(weights[c] for c in codes)
+    tw = {c: weights[c] / total_w for c in codes}
+    meta = data["meta"]
+    is_us = {c: meta[c].get("market") == "US" for c in codes}
+    fx_dates = [r[0] for r in data["fx"]] if data.get("fx") else []
+    fx_vals = [r[1] for r in data["fx"]] if data.get("fx") else []
+    any_us = any(is_us.values())
+    if any_us and not fx_dates:
+        return {"error": "USDKRW 환율 데이터가 없습니다."}
+
+    sets = [set(d for d in data["prices"][c] if start <= d <= end) for c in codes]
+    common = sorted(set.intersection(*sets))
+    if any_us:
+        common = [d for d in common if _div_fx_asof(fx_dates, fx_vals, d) is not None]
+    if len(common) < 20:
+        return {"error": "선택한 ETF의 공통 기간이 너무 짧습니다."}
+    day0, last_d = common[0], common[-1]
+
+    # KRW price map on the common calendar (US = USD close × previous-day FX)
+    pk: dict[str, dict[str, float]] = {}
+    fx_on: dict[str, float] = {}
+    for d in common:
+        fx_on[d] = _div_fx_asof(fx_dates, fx_vals, d) if any_us else 1.0
+    for c in codes:
+        src = data["prices"][c]
+        if is_us[c]:
+            pk[c] = {d: src[d] * fx_on[d] for d in common}
+        else:
+            pk[c] = {d: src[d] for d in common}
+
+    # events (ex > day0 and ex ≤ last common date), applied on first common date ≥ ex
+    ev_by_code = {}
+    for c in codes:
+        ev_by_code[c] = [e for e in data["div"][c]["events"] if day0 < e["ex"] <= last_d]
+    ptr = {c: 0 for c in codes}
+
+    q = lambda m: (int(m) - 1) // 3  # noqa: E731
+
+    def is_rebal(prev, cur):
+        if rebalance == "N":
+            return False
+        py, pm = prev[:4], prev[5:7]
+        cy, cm = cur[:4], cur[5:7]
+        if rebalance == "Y":
+            return py != cy
+        if rebalance == "M":
+            return prev[:7] != cur[:7]
+        return py != cy or q(pm) != q(cm)
+
+    units = {c: tw[c] * initial_capital / pk[c][day0] for c in codes}
+    value = sum(units[c] * pk[c][day0] for c in codes)
+    invested = float(initial_capital)
+    contributions = 1
+    withdrawn = 0.0
+    total_cost = 0.0
+    rebal_count = 0
+    dca_count = 0
+    reinvest_count = 0
+    peak_w = value
+    mdd = 0.0
+    peak_h = value
+    mdd_h = 0.0
+    events_log = []
+    curve = [{"d": day0, "v": value, "w": value, "inv": invested}]
+    prev = day0
+    for d in common[1:]:
+        value = sum(units[c] * pk[c][d] for c in codes if c in units)
+        # distributions: ex in (prev, d]; entitlement = units held at previous close
+        for c in codes:
+            lst = ev_by_code[c]
+            while ptr[c] < len(lst) and lst[ptr[c]]["ex"] <= d:
+                e = lst[ptr[c]]
+                ptr[c] += 1
+                u = units.get(c, 0.0)
+                if not (u > 0):
+                    continue
+                fx = _div_fx_asof(fx_dates, fx_vals, e["ex"]) if is_us[c] else 1.0
+                native = u * e["amt"]
+                gross = native * fx
+                prof = data["div"][c].get("taxProfile", "KR_LISTED")
+                rate = float(tax_rates.get(prof, 0.0))
+                tax = gross * rate
+                net = gross - tax
+                rec = {"ex": e["ex"], "d": d, "code": c, "amt": e["amt"], "units": u, "fx": fx,
+                       "native": native, "gross": gross, "tax": tax, "net": net, "src": e.get("src")}
+                if mode == "cash":
+                    withdrawn += net
+                else:
+                    c_cost = 0.5 * net * cost
+                    total_cost += c_cost
+                    units[c] = u + (net - c_cost) / pk[c][d]
+                    value += net - c_cost
+                    reinvest_count += 1
+                events_log.append(rec)
+        new_month = prev[:7] != d[:7]
+        do_full = False if band_on else is_rebal(prev, d)
+        contrib = 0.0
+        if monthly_contribution > 0 and new_month:
+            contrib = float(monthly_contribution)
+            value += contrib
+            invested += contrib
+            contributions += 1
+        if not do_full and contrib > 0:
+            w_old = _current_weights(units, pk, d, value)
+            new_units = dict(units)
+            dca_count += 1
+            for c, w in tw.items():
+                if w > 0:
+                    new_units[c] = new_units.get(c, 0.0) + contrib * w / pk[c][d]
+            if cost > 0:
+                w_new = _current_weights(new_units, pk, d, value)
+                to = _one_way_turnover(w_old, w_new)
+                if to > 0:
+                    total_cost += value * to * cost
+                    k = 1 - to * cost
+                    for c in new_units:
+                        new_units[c] *= k
+            units = {c: u for c, u in new_units.items() if u > 0}
+            value = sum(units[c] * pk[c][d] for c in units)
+        if band_on and not do_full and _band_drift_exceeds(units, pk, d, value, tw, band_pct):
+            do_full = True
+        if do_full:
+            rebal_count += 1
+            w_old = _current_weights(units, pk, d, value)
+            if cost > 0:
+                to = _one_way_turnover(w_old, tw)
+                if to > 0:
+                    drag = value * to * cost
+                    total_cost += drag
+                    value -= drag
+            units = {c: tw[c] * value / pk[c][d] for c in codes}
+            value = sum(units[c] * pk[c][d] for c in codes)
+        wealth = value + withdrawn
+        peak_w = max(peak_w, wealth)
+        mdd = min(mdd, wealth / peak_w - 1)
+        peak_h = max(peak_h, value)
+        mdd_h = min(mdd_h, value / peak_h - 1)
+        curve.append({"d": d, "v": value, "w": wealth, "inv": invested})
+        prev = d
+
+    # ---- aggregation (label month = actual ex-date month) ----
+    months = _div_months(day0, last_d)
+    mrow = {ym: {"ym": ym, "gross": 0.0, "tax": 0.0, "net": 0.0, "count": 0, "byCode": {}} for ym in months}
+    for r in events_log:
+        m = mrow[r["ex"][:7]]
+        m["gross"] += r["gross"]
+        m["tax"] += r["tax"]
+        m["net"] += r["net"]
+        m["count"] += 1
+        b = m["byCode"].setdefault(r["code"], {"gross": 0.0, "tax": 0.0, "net": 0.0, "native": 0.0})
+        b["gross"] += r["gross"]
+        b["tax"] += r["tax"]
+        b["net"] += r["net"]
+        b["native"] += r["native"]
+    first_wd = _div_edge_weekday(months[0], False)
+    last_wd = _div_edge_weekday(months[-1], True)
+    for ym in months:
+        m = mrow[ym]
+        no_data = []
+        unver = []
+        for c in codes:
+            cov = data["div"][c].get("coverage") or {}
+            if ym < (cov.get("from") or "0000")[:7] or ym > (cov.get("to") or "9999")[:7]:
+                no_data.append(c)
+            elif _div_in_ranges(ym, data["div"][c].get("gaps")):
+                unver.append(c)
+        if len(no_data) == len(codes):
+            st = "no_data"
+        elif no_data:
+            st = "partial"
+        elif unver:
+            st = "unverified"
+        else:
+            st = "ok"
+        m["status"] = st
+        if no_data:
+            m["noData"] = no_data
+        if unver:
+            m["unverified"] = unver
+        inc = (ym == months[0] and day0 > first_wd) or (ym == months[-1] and last_d < last_wd)
+        if inc:
+            m["inc"] = True
+    month_list = [mrow[ym] for ym in months]
+
+    years = []
+    ys = sorted({ym[:4] for ym in months})
+    prev_y = None
+    for y in ys:
+        rows = [mrow[ym] for ym in months if ym[:4] == y]
+        g = sum(r["gross"] for r in rows)
+        t = sum(r["tax"] for r in rows)
+        n = sum(r["net"] for r in rows)
+        usd_native = 0.0
+        usd_krw = 0.0
+        for r in events_log:
+            if r["ex"][:4] == y and is_us[r["code"]]:
+                usd_native += r["native"]
+                usd_krw += r["gross"]
+        yr = {"y": y, "gross": g, "tax": t, "net": n, "count": sum(r["count"] for r in rows),
+              "partial": (y == ys[0] and day0 > f"{y}-01-07") or (y == ys[-1] and last_d < f"{y}-12-24"),
+              "status": "ok"}
+        sts = {r["status"] for r in rows}
+        if "no_data" in sts or "partial" in sts:
+            yr["status"] = "partial"
+        elif "unverified" in sts:
+            yr["status"] = "unverified"
+        if any_us:
+            yr["usdGross"] = usd_native
+            yr["usdKrwGross"] = usd_krw
+            yr["fxBar"] = usd_krw / usd_native if usd_native > 0 else None
+            if (prev_y is not None and not yr["partial"] and not prev_y["partial"]
+                    and prev_y.get("usdGross") and usd_native > 0 and prev_y["usdKrwGross"] > 0):
+                yr["growthKrwPct"] = usd_krw / prev_y["usdKrwGross"] - 1
+                yr["growthUsdPct"] = usd_native / prev_y["usdGross"] - 1
+                yr["fxEffectPct"] = yr["fxBar"] / prev_y["fxBar"] - 1
+        years.append(yr)
+        prev_y = yr
+
+    # TTM = last 12 COMPLETE calendar months by ex-date month (an incomplete final month is
+    # excluded) — avoids counting the same quarter twice when ex-dates drift by a few days.
+    end_m = months[-1] if not mrow[months[-1]].get("inc") else _div_shift_ym(months[-1], -1)
+    start_m = _div_shift_ym(end_m, -11)
+    ttm_months = [ym for ym in months if start_m <= ym <= end_m]
+    tt = [r for r in events_log if start_m <= r["ex"][:7] <= end_m]
+    ttm = {
+        "from": start_m, "to": end_m,
+        "gross": sum(r["gross"] for r in tt), "tax": sum(r["tax"] for r in tt), "net": sum(r["net"] for r in tt),
+        "count": len(tt), "short": months[0] > start_m or (months[0] == start_m and bool(mrow[start_m].get("inc"))),
+        "flags": sorted({mrow[ym]["status"] for ym in ttm_months} - {"ok"}),
+        "label": "월평균 = TTM÷12",
+    }
+    ttm["monthlyAvg"] = ttm["net"] / 12
+    ttm["monthlyAvgGross"] = ttm["gross"] / 12
+
+    by_code = {}
+    for r in events_log:
+        b = by_code.setdefault(r["code"], {"gross": 0.0, "tax": 0.0, "net": 0.0, "native": 0.0, "count": 0})
+        b["gross"] += r["gross"]
+        b["tax"] += r["tax"]
+        b["net"] += r["net"]
+        b["native"] += r["native"]
+        b["count"] += 1
+
+    n_days = len(common) - 1
+    yrs = n_days / 252
+    final_value = value
+    wealth = value + withdrawn
+    total_incl = wealth / invested - 1
+    return {
+        "mode": mode, "basis": "ex_date", "start": day0, "end": last_d, "days": n_days, "years": yrs,
+        "codes": codes, "weights": tw, "rebalance": rebalance,
+        "initial": float(initial_capital), "monthly": float(monthly_contribution),
+        "invested": invested, "contributions": contributions,
+        "finalValue": final_value, "withdrawnNet": withdrawn, "wealth": wealth,
+        "totalReturnIncl": total_incl,
+        "holdingsReturn": final_value / invested - 1,
+        "cagr": (wealth / invested) ** (1 / yrs) - 1 if yrs > 0 else 0.0,
+        "mdd": mdd, "mddHoldings": mdd_h,
+        "costDrag": total_cost, "rebalCount": rebal_count, "dcaBuyCount": dca_count, "reinvestCount": reinvest_count,
+        "taxRates": tax_rates,
+        "dividends": {
+            "months": month_list, "years": years, "ttm": ttm, "byCode": by_code,
+            "totalGross": sum(r["gross"] for r in events_log),
+            "totalTax": sum(r["tax"] for r in events_log),
+            "totalNet": sum(r["net"] for r in events_log),
+            "events": events_log,
+        },
+        "curve": curve,
+    }
+
+
 def main():
 
     raw, prices = load()
