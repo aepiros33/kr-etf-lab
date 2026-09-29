@@ -48,11 +48,51 @@
             <option value="N">리밸런싱 없음</option>
           </select>
         </div>
-        <!-- STORY_SCRIPT_KEEP_REST: this file is complete in repo; script tag added at bottom -->
-        <p class="muted-note">성적표 패널은 스크립트가 프리셋 바로 아래에 삽입합니다.</p>
+        <div class="row" id="customDates" style="display:none">
+          <input type="date" id="startDate" />
+          <input type="date" id="endDate" />
+        </div>
+        <p class="muted-note" id="rebalRuleNote">분기·연 1회·매월은 해당 날짜에만 전체 보유를 목표 비중으로 재조정했습니다. 월 적립은 목표 비중으로 추가 매수만, 금/국면헤지/변동성 타깃/슬리브 추세의 월간 갱신은 오버레이 슬리브만 조정(기존 보유 간 비율 유지) · 과거 시뮬.</p>
+        <p class="muted-note">이하 제어(모멘텀·대역·국면헤지·금슬리브 등)는 기존과 동일하며 성적표는 이 패널 아래에 JS가 삽입합니다.</p>
+        <div class="section-title">ETF 검색 · 필터</div>
+        <div class="row">
+          <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
+        </div>
+        <div class="cats" id="catFilters"></div>
+        <div class="cats struct-filters" id="structFilters" aria-label="구조 필터"></div>
+        <div class="section-title">ETF · 한국 증권앱에서 매수 가능</div>
+        <div class="etf-list" id="etfList"></div>
+        <div class="sel-glance" id="selGlance" aria-live="polite">
+          <div class="sel-glance-head">
+            <div class="sel-glance-title" id="selGlanceTitle">선택 0종 · 합 0%</div>
+          </div>
+          <div class="sel-glance-empty" id="selGlanceEmpty">선택한 ETF가 없습니다.</div>
+          <div class="sel-glance-bar" id="selGlanceBar" hidden></div>
+          <div class="sel-glance-list" id="selGlanceList" hidden></div>
+        </div>
+        <div class="sumline"><span id="sum">비중 합 0%</span><span>자동 정규화 · 시세는 선택 종목만 로드</span></div>
+        <div id="irpWarn" class="irp-warn" style="display:none"></div>
+        <div class="btn-row">
+          <button type="button" class="secondary" id="clearSelection">선택 초기화</button>
+          <button type="button" class="secondary" id="btnShareSettings">설정 링크</button>
+          <button type="button" class="primary" id="run">백테스트 실행</button>
+        </div>
       </aside>
       <main id="result"><div class="card pad empty">계산 중…</div></main>
     </div>
+    <div class="layout div-layout" id="divLayout" hidden>
+      <aside class="card pad sidebar" id="divSidebar">
+        <div class="section-title">배당 현금흐름 · 프리셋 (예시)</div>
+        <div class="presets" id="divPresets"></div>
+        <div class="btn-row">
+          <button type="button" class="secondary" id="divClear">선택 초기화</button>
+          <button type="button" class="primary" id="divRun">배당 시뮬 실행</button>
+        </div>
+        <p class="muted-note" id="divDataNote"></p>
+      </aside>
+      <main id="divResult"><div class="card pad empty">프리셋을 고르거나 종목을 선택한 뒤 「배당 시뮬 실행」을 누르세요.</div></main>
+    </div>
+    <p class="foot">시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.</p>
   </div>
   <script src="./app.js?v=div3"></script>
   <script src="./story-board.js?v=story2"></script>
