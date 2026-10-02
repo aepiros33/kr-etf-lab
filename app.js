@@ -107,6 +107,93 @@ const PRESETS = {
       "153130": 15,
     },
   },
+  divIncomeKR: {
+    label: "💴 배당소득형",
+    longProxy: false,
+    proxyTip: "국내 고배당 + 미국배당다우(KR상장) + 단기채 · 인컴 스타일 과거 시뮬(상장일 이후).",
+    w: {
+      "161510": 35,
+      "458730": 35,
+      "153130": 30,
+    },
+  },
+  globalMulti: {
+    label: "🌏 글로벌분산",
+    longProxy: false,
+    proxyTip: "한·미·일·중 + 국고·단기채 · 지역 분산 과거 시뮬(공통기간=최단 상장).",
+    w: {
+      "069500": 20,
+      "133690": 25,
+      "241180": 15,
+      "371160": 15,
+      "148070": 15,
+      "153130": 10,
+    },
+  },
+  koreaGrowth: {
+    label: "🚀 한국성장",
+    longProxy: false,
+    proxyTip: "코스피200 + 코스닥150 + 반도체 + 단기채 · 국내 성장 스타일 과거 시뮬.",
+    w: {
+      "069500": 35,
+      "229200": 30,
+      "091160": 20,
+      "153130": 15,
+    },
+  },
+  bondBarbell: {
+    label: "⚖️ 채권Barbell",
+    longProxy: false,
+    proxyTip: "단기채·CD + 국고10년·종합채권 · 금리 바벨 과거 시뮬(레버리지/인버스 없음).",
+    w: {
+      "153130": 35,
+      "459580": 15,
+      "148070": 25,
+      "273130": 25,
+    },
+  },
+  coveredCallIncome: {
+    label: "📞 커버드콜소득",
+    longProxy: false,
+    proxyTip: "200/배당/미국배당 커버드콜 + 단기채 · 커버드콜≠레버리지. 상장 이후 구간만.",
+    w: {
+      "498400": 30,
+      "472150": 25,
+      "441640": 20,
+      "153130": 25,
+    },
+  },
+  reitInfra: {
+    label: "🏢 리츠+인프라",
+    longProxy: false,
+    proxyTip: "리츠·부동산인프라 + AI전력인프라 + 단기채 · 실물/인프라 스타일 과거 시뮬.",
+    w: {
+      "329200": 35,
+      "487230": 25,
+      "476800": 20,
+      "153130": 20,
+    },
+  },
+  usDivDowKR: {
+    label: "🇺🇸 미국배당다우존스",
+    longProxy: false,
+    proxyTip: "TIGER 미국배당다우존스(KR상장) + 국고·단기 완충 · 배당주 테마 과거 시뮬.",
+    w: {
+      "458730": 50,
+      "148070": 25,
+      "153130": 25,
+    },
+  },
+  maturityBondMix: {
+    label: "📅 만기매칭채+주식",
+    longProxy: false,
+    proxyTip: "만기매칭 회사채액티브 + 코스피200 + 단기채 · 상장 짧아 공통기간 제한.",
+    w: {
+      "0007F0": 40,
+      "069500": 25,
+      "153130": 35,
+    },
+  },
 };
 const CATS = ["전체", "국내주식", "해외주식", "테마", "채권", "원자재", "현금성"];
 const BENCH = "069500";
@@ -1144,6 +1231,15 @@ function renderList() {
       (b.marcap || 0) - (a.marcap || 0) ||
       a.name.localeCompare(b.name, "ko")
   );
+  const countEl = $("#etfListCount");
+  if (countEl && state.meta) {
+    const total = state.meta.etfs.length;
+    const shown = ordered.length;
+    countEl.textContent =
+      shown === total
+        ? `시총순 · ${total}종`
+        : `표시 ${shown} / 전체 ${total}`;
+  }
   if (!ordered.length) {
     box.innerHTML = `<div class="muted-note">검색 결과가 없습니다.</div>`;
     updateSum();

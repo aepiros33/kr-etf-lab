@@ -14,7 +14,7 @@
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python3 agents/fast_ingest.py          # 시총 상위 ~80개 메타 + 종가 수집
+python3 agents/fast_ingest.py          # 시총 상위 ~200개(+시드) 메타 + 종가 수집
 python3 agents/reviewer.py             # PASS 확인
 python3 serve.py
 # 브라우저: http://127.0.0.1:8765

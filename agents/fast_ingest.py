@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fast agent: mechanical ingest of KRX-listed ETF prices.
 
-Stores metadata for ~top N ETFs by market cap, and price series as:
+Stores metadata for ~top N ETFs by market cap (default 200), and price series as:
   - data/etf_meta.json          (lightweight list for UI)
   - data/prices/{code}.json     (per-ticker series for selective load)
   - data/etf_prices.json        (combined bundle for reviewer / offline)
@@ -27,7 +27,7 @@ META_OUT = DATA / "etf_meta.json"
 PRICES_DIR = DATA / "prices"
 BUNDLE_OUT = DATA / "etf_prices.json"
 BENCH = "069500"
-TOP_N = 80
+TOP_N = 200
 START = "2015-01-01"  # FDR default; for pre-2015 use agents/yf_backfill.py --start 2007-01-01
 
 # Curated names/blurbs for well-known tickers (optional overrides).
@@ -55,6 +55,25 @@ CURATED = {
     "357870": ("TIGER CD금리투자KIS(합성)", "현금성", "미래에셋", "단기 금리", False),
     "459580": ("KODEX CD금리액티브(합성)", "현금성", "삼성자산운용", "단기 금리", False),
 }
+
+# Always force-include (category coverage / presets / overlays), even if outside top-N rank day.
+FORCE_SEEDS = [
+    "241180",  # TIGER 일본니케이225
+    "371160",  # TIGER 차이나항셍테크
+    "453810",  # KODEX 인도Nifty50
+    "476800",  # KODEX 한국부동산리츠인프라
+    "0007F0",  # KODEX 27-12 회사채(AA-이상)액티브 — 만기매칭
+    "438330",  # TIGER 우량회사채액티브
+    "365780",  # ACE 국고채10년
+    "466940",  # TIGER 은행고배당플러스TOP10
+    "441800",  # TIME Korea플러스배당액티브
+    "315960",  # RISE 대형고배당10TR
+    "446720",  # SOL 미국배당다우존스
+    "402970",  # ACE 미국배당다우존스
+    "489250",  # KODEX 미국배당다우존스
+    "367760",  # RISE 네트워크인프라
+]
+
 
 # FDR Category code → UI category fallback.
 FDR_CAT = {
@@ -101,22 +120,24 @@ def guess_issuer(name: str) -> str:
 
 def classify(name: str, fdr_cat) -> tuple[str, bool]:
     """Return (category, leveraged)."""
-    n = name.upper()
     leveraged = bool(re.search(r"레버리지|인버스|2X|3X|-2X", name, re.I))
     if re.search(r"CD금리|KOFR|머니마켓|MMF|초단기|단기채권|파킹", name, re.I):
         return "현금성", leveraged
+    # Target-maturity / bullet company·special bonds before broad bond
+    if re.search(r"\d{2}-\d{2}\s*회사채|\d{2}-\d{2}\s*금융채|만기자동연장|만기매칭", name, re.I):
+        return "채권", leveraged
     if re.search(r"국고|채권|회사채|종합채권|금리", name, re.I) and "주식" not in name:
         return "채권", leveraged
     if re.search(r"금현물|골드|은선물|원유|WTI|구리|원자재", name, re.I):
         return "원자재", leveraged
     if re.search(
-        r"미국|S&P|나스닥|중국|일본|유럽|인도|대만|홍콩|베트남|글로벌|세계|MSCI World|선진국",
+        r"미국|S&P|나스닥|중국|차이나|일본|니케이|유럽|인도|Nifty|니프티|대만|홍콩|항셍|베트남|글로벌|세계|MSCI World|선진국",
         name,
         re.I,
     ):
         return "해외주식", leveraged
     if re.search(
-        r"반도체|2차전지|바이오|AI|로봇|방산|배당|커버드콜|코스닥|은행|자동차|에너지|친환경|헬스케어",
+        r"리츠|부동산인프라|반도체|2차전지|바이오|AI|로봇|방산|배당|커버드콜|코스닥|은행|자동차|에너지|친환경|헬스케어|인프라",
         name,
         re.I,
     ):
@@ -204,6 +225,9 @@ def main():
     meta_map = listing.set_index("Symbol").to_dict("index")
 
     force = [c.strip().zfill(6) for c in args.codes.split(",") if c.strip()]
+    for c in FORCE_SEEDS:
+        if c not in force:
+            force.append(c)
     if args.only:
         if not force:
             raise SystemExit("--only requires --codes")

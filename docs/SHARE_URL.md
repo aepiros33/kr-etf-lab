@@ -10,7 +10,7 @@ KR ETF Lab은 주소 **해시(`#`)** 에 핵심 설정을 넣어 같은 화면�
 | 키 | 의미 | 예 |
 |---|---|---|
 | `v` | 스키마 버전 | `1` |
-| `preset` | 프리셋 id (보유와 일치할 때 우선) | `kAllWeather` |
+| `preset` | 프리셋 id (보유와 일치할 때 우선) | `kAllWeather` `divIncomeKR` `globalMulti` `koreaGrowth` `bondBarbell` `coveredCallIncome` `reitInfra` `usDivDowKR` `maturityBondMix` |
 | `h` | 커스텀 보유 `코드*비중`을 `_`로 연결 | `069500*40_133690*40` |
 | `p` | 기간 | `1y` `3y` `5y` `10y` `max` `custom` |
 | `ps` `pe` | custom일 때 시작·종료일 | `2016-01-01` |

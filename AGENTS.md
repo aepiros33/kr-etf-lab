@@ -8,7 +8,7 @@
 비교 목적으로 일부 **미국 상장 ETF**를 「배당 현금흐름」 모드의 「해외 직투 비교」 그룹(`data/div_meta.json` `market:"US"`)으로만 제공한다. 미국 ETF는 **기본 프리셋·기본 전략·MOM/DMOM/XSMOM/MOM12_1/invVol 후보군(`etf_meta.json`)에 넣지 않는다**(가격 시뮬 결과 바이트 동일 유지). 레버리지/인버스 미국 ETF는 포함하지 않는다.
 
 - 실행: `python3 serve.py` → http://127.0.0.1:8765
-- 시세 갱신: `python3 agents/fast_ingest.py` (시총 상위 ~80, 메타+선택 로드용 종가)
+- 시세 갱신: `python3 agents/fast_ingest.py` (시총 상위 ~200 + FORCE_SEEDS, 메타+선택 로드용 종가)
 - 검수: `python3 agents/reviewer.py` 반드시 PASS 후에만 UI 변경 머지
 
 ## 역할 분리 (숫자를 모델이 계산하지 말 것)
@@ -54,7 +54,7 @@
   - 환율: FRED `DEXKOUS` 기준 + 최근분 Yahoo `KRW=X`(주말 행 제외) → `data/fx/USDKRW.json`
   - 목록·범위·미확인 구간: `data/div_meta.json`
 - pykrx는 KRX 로그인 필요할 수 있어 기본 경로로 쓰지 말 것
-- 유니버스는 시총 상위 유동성 KRX ETF. 레버리지/인버스는 태그 달고 기본 프리셋에 넣지 말 것
+- 유니버스는 시총 상위 ~200 유동성 KRX ETF(+지역·배당·리츠·만기매칭 시드). 레버리지/인버스는 태그 달고 기본 프리셋·MOM 후보에 넣지 말 것
 
 ## 리밸런싱 모드
 
