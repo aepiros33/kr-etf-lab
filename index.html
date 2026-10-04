@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>KR ETF Lab — 한국 상장 ETF 포트폴리오 시뮬</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="./styles.css?v=univ1" />
+  <link rel="stylesheet" href="./styles.css?v=feat12" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -239,6 +239,39 @@
             <input type="number" id="monthlyAmount" min="0" step="100000" value="500000" />
           </label>
         </div>
+        <div class="section-title">인출 (일시금 이후)</div>
+        <label class="field">방식
+          <select id="withdrawMode">
+            <option value="none" selected>없음</option>
+            <option value="amount">매월 정액</option>
+            <option value="rate">매월 정률(잔액 대비)</option>
+          </select>
+        </label>
+        <div class="row" id="withdrawInputs" style="display:none">
+          <label class="field">시작 원금(원)
+            <input type="number" id="withdrawInitial" min="1" step="1000000" value="100000000" />
+          </label>
+          <label class="field" id="withdrawAmountField">매월 인출(원)
+            <input type="number" id="withdrawAmount" min="0" step="100000" value="500000" />
+          </label>
+          <label class="field" id="withdrawRateField" style="display:none">매월 잔액 비율(%)
+            <input type="number" id="withdrawRatePct" min="0" max="20" step="0.1" value="0.4" />
+          </label>
+        </div>
+        <p class="muted-note">일시금 이후 매월 첫 거래일에 잔액에서 뺍니다. 월 적립과 같이 쓰지 않습니다. 정액이 잔액 이상이면 그날 잔액 0. 과거 기준 이 속도면 이 시점에 바닥. 앞으로를 말하지 않습니다.</p>
+        <label class="field">상대 비교 ETF
+          <select id="benchCode"></select>
+        </label>
+        <p class="muted-note">초과수익·추적오차·정보비율·상승/하락 포착은 고른 ETF의 수정주가 경로 대비입니다. 지수 NAV 추적오차가 아닙니다. 기본 069500.</p>
+        <div class="section-title">환헤지 · 비헤지</div>
+        <label class="field">같은 기초 쌍
+          <select id="hedgePair"></select>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="showFx" />
+          <span>같은 창의 USDKRW를 옆에 표시</span>
+        </label>
+        <p class="muted-note">이름에서 (H)·환헤지를 빼고 운용사와 기초가 같은 쌍만. 둘 다 KRW 수정주가, 같은 날짜, 100% 보유·리밸 없음. 차이는 환율 그 자체가 아닙니다. 과거 시뮬.</p>
 
         <div class="section-title">분배금 · 총수익</div>
         <div id="priceReturnDisclosure" class="price-return-box">
@@ -292,8 +325,18 @@
         <div class="section-title">ETF 검색 · 필터</div>
         <div class="row">
           <input type="search" id="etfSearch" placeholder="이름·코드·운용사 검색" autocomplete="off" />
+          <label class="field">시총 하한(억원)
+            <select id="aumFloor" aria-label="시총 하한">
+              <option value="0" selected>전체</option>
+              <option value="1000">1,000+</option>
+              <option value="5000">5,000+</option>
+              <option value="10000">10,000+</option>
+              <option value="30000">30,000+</option>
+            </select>
+          </label>
           <span class="muted-note" id="etfListCount" style="margin-left:0.5rem"></span>
         </div>
+        <p class="muted-note">시총은 수집 시점 스냅샷(억원)입니다. 하한보다 작은 종목은 목록에서 빠집니다. 정렬은 기존 시총순입니다.</p>
         <div class="cats" id="catFilters"></div>
         <div class="cats struct-filters" id="structFilters" aria-label="구조 필터"></div>
         <p class="muted-note">구조 뱃지: 환헤지(H)·선물·현물은 종목명 패턴(환헤지/(H), 선물, 현물)으로 표시·필터합니다.</p>
@@ -365,7 +408,20 @@
           <label class="seg-opt"><input type="radio" name="divTaxView" value="after" checked /><span>세후 막대</span></label>
           <label class="seg-opt"><input type="radio" name="divTaxView" value="pre" /><span>세전 막대</span></label>
         </div>
-        <p class="muted-note">일반계좌 가정: 미국 직투 분배금 15%(미국 원천), 국내상장 ETF 분배금 15.4%. ISA·연금계좌 미반영.</p>
+        <div class="section-title">계좌 유형 (분배금 세금만)</div>
+        <label class="toggle"><input type="radio" name="divAccount" value="general" checked /><span>일반 15.4% (국내상장 분배금) · 미국 직투는 원천 15%</span></label>
+        <label class="toggle"><input type="radio" name="divAccount" value="isa" /><span>ISA · 연 200만 원까지 0, 초과분 9.9% 분리과세</span></label>
+        <label class="toggle"><input type="radio" name="divAccount" value="pension" /><span>연금 인출세 3.3–5.5%</span></label>
+        <div class="row" id="divPensionRow" style="display:none">
+          <label class="field">인출세율
+            <select id="divPensionRate">
+              <option value="0.033">3.3%</option>
+              <option value="0.044" selected>4.4%</option>
+              <option value="0.055">5.5%</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted-note">일반계좌 가정은 국내상장 분배금 15.4%, 미국 직투는 원천 15%입니다. ISA는 국내상장 분배금만 한도·분리과세입니다. 연금은 국내상장 분배금에 3.3–5.5%만 적용합니다. 금융소득종합과세·건강보험료는 넣지 않습니다. 분배 데이터가 없는 달은 미확인 또는 데이터 없음이며 0으로 두지 않습니다.</p>
 
         <div class="section-title">종목 (분배 데이터 보유분만)</div>
         <div class="cats" id="divGroupTabs" role="tablist"></div>
@@ -383,7 +439,7 @@
       시뮬레이터입니다. 투자 자문이 아니며 과거 수익률은 미래 수익을 보장하지 않습니다.
       모멘텀·역변동성·이동평균 등 파라미터는 민감합니다. 특정 설정을 따라가면 수익이 난다는 뜻이 아닙니다.
       시세는 FinanceDataReader(KRX/네이버) 수정주가(분배락 조정) 종가입니다. 가격 시뮬은 수정주가 기준(분배금 세전 재투자 효과 포함) · 세금 미반영 · 과거 시뮬입니다. 별도 TR 가산은 이중 계산이라 제공하지 않습니다.
-      배당 현금흐름 탭은 원가격(분할만 조정)과 실제 분배 이벤트(국내: KRX KIND 공시, 미국: 발행사·Nasdaq·stockanalysis·Yahoo 대조), USDKRW(FRED DEXKOUS + Yahoo 보완, 전일 환율)로 계산하며 일반계좌 원천세(미국 15%, 국내 15.4%)만 반영합니다.
+      배당 현금흐름 탭은 원가격(분할만 조정)과 실제 분배 이벤트(국내: KRX KIND 공시, 미국: 발행사·Nasdaq·stockanalysis·Yahoo 대조), USDKRW(FRED DEXKOUS + Yahoo 보완, 전일 환율)로 계산합니다. 계좌는 일반 15.4%(미국 직투 원천 15%), ISA(국내상장 분배금 연 200만 원까지 0·초과 9.9% 분리과세), 연금 인출세 3.3–5.5% 중 하나입니다. 금융소득종합과세·건강보험료는 넣지 않습니다.
       리밸런싱 거래비용은 편도 회전율(TO)×비용률로 차감합니다(기본 0.10%).
       월 적립 수익률은 납입 원금 합 대비입니다. 세금·IRP 안전자산 표시는 단순화 모형이며 자문이 아닙니다.
       수중 낙폭·롤링 연환산은 과거 관측 통계이며 미래 수익을 의미하지 않습니다.
@@ -391,7 +447,7 @@
       프리셋은 장기 시세 ETF(나스닥100·국고채·금선물·단기채 153130)를 사용합니다. FDR 이전 구간은 Yahoo Finance code.KS auto_adjust 종가로 병합할 수 있습니다. 현금 기본은 KODEX 단기채권(153130); 214980은 메타에 있으면 선택 가능. 금 슬리브 기본은 KODEX 골드선물(H)(132030); 현물(411060)도 선택 가능(선물≠현물, 환헤지·롤 비용은 전환비용 외 미모형). 과거 시뮬 · 투자 자문 아님.
     </p>
   </div>
-  <script src="./app.js?v=univ1"></script>
+  <script src="./app.js?v=feat12"></script>
   <script src="./story-board.js?v=story2"></script>
 </body>
 </html>

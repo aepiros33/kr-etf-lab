@@ -289,6 +289,15 @@ const state = {
   totalReturn: false,
   accountType: "taxable",
   pensionTaxRate: 0.044,
+  benchCode: "069500",
+  aumFloor: 0,
+  withdrawMode: "none",
+  withdrawAmount: 500000,
+  withdrawRate: 0.004,
+  hedgePair: "",
+  showFx: false,
+  cpi: null,
+  fxRows: null,
 };
 const $ = (s) => document.querySelector(s);
 
@@ -1052,6 +1061,19 @@ async function boot() {
   renderCatFilters();
   renderStructFilters();
   renderList();
+  renderBenchOptions();
+  renderHedgeOptions();
+  try {
+    const cpiRes = await fetch("./data/cpi_kr.json");
+    if (cpiRes.ok) state.cpi = await cpiRes.json();
+  } catch (_) { /* gated */ }
+  try {
+    const fxRes = await fetch("./data/fx/USDKRW.json");
+    if (fxRes.ok) {
+      const fx = await fxRes.json();
+      state.fxRows = fx.rows || [];
+    }
+  } catch (_) { /* optional */ }
   const shared = parseShareHash();
   if (shared && (shared.get("preset") || shared.get("h"))) {
     await applyShareParams(shared);
@@ -1207,6 +1229,7 @@ function filteredEtfs() {
   const anyStruct = !!(sf.hedged || sf.futures || sf.spot);
   return state.meta.etfs.filter((etf) => {
     if (state.category !== "전체" && etf.category !== state.category) return false;
+    if (state.aumFloor > 0 && !(Number(etf.marcap) >= state.aumFloor)) return false;
     if (anyStruct) {
       const flags = etfStructureFlags(etf);
       const hit =
@@ -1694,7 +1717,8 @@ async function run() {
     state.sleeveTrend;
   const needHedge = !!state.regimeHedge;
   const needGold = !!state.goldOn;
-  const extra = [BENCH];
+  const benchCode = state.benchCode || BENCH;
+  const extra = [BENCH, benchCode];
   if (needCash) extra.push(state.cashCode || "153130");
   if (needHedge) {
     extra.push(REGIME_HEDGE_B);
@@ -1749,7 +1773,8 @@ async function run() {
     }
   }
   const [start, end] = periodBounds();
-  const initial = state.dcaOn ? state.initialCapital : 1;
+  const withdrawOn = !state.dcaOn && state.withdrawMode && state.withdrawMode !== "none";
+  const initial = state.dcaOn || withdrawOn ? state.initialCapital : 1;
   const monthly = state.dcaOn ? state.monthlyAmount : 0;
   const hedgeLoad =
     needHedge
@@ -1823,9 +1848,13 @@ async function run() {
       sleeveTrendMode: state.sleeveTrendMode === "ma" ? "ma" : "abs",
       sleeveTrendLookback: Number(state.sleeveTrendLookback) >= 3 ? 3 : 1,
       etfFlags: etfFlagsMap(),
+      withdrawMode: withdrawOn ? state.withdrawMode : "none",
+      withdrawAmount: state.withdrawAmount,
+      withdrawRate: state.withdrawRate,
     }
   );
-  const bench = backtest({ [BENCH]: 100 }, priceMap, result.start || start, result.end || end, "Q", 1, 0);
+  const benchId = state.prices[benchCode] ? benchCode : BENCH;
+  const bench = backtest({ [benchId]: 100 }, priceMap, result.start || start, result.end || end, "N", 1, 0);
   const corr = result.error ? null : buildCorrMatrix(codes, result.start || start, result.end || end);
   const tax =
     result.error || !state.dcaOn
@@ -2607,6 +2636,18 @@ function backtest(
   let totalCostDrag = 0;
   const curve = [],
     rets = [];
+  const holdingPnl = {};
+  const holdRows = [];
+  const cfMid = [];
+  let totalWithdrawn = 0;
+  let depletionDate = null;
+  const withdrawMode = opts.withdrawMode === "amount" || opts.withdrawMode === "rate" ? opts.withdrawMode : "none";
+  const withdrawAmount = Math.max(0, Number(opts.withdrawAmount) || 0);
+  const withdrawRate = Math.max(0, Math.min(1, Number(opts.withdrawRate) || 0));
+  const withdrawOn =
+    withdrawMode !== "none" &&
+    monthlyContribution <= 0 &&
+    (withdrawMode === "amount" ? withdrawAmount > 0 : withdrawRate > 0);
 
   // MA signal: month-start state currently applied (monthly mode) + flip count
   let maState = null;
@@ -2782,7 +2823,19 @@ function backtest(
     } else {
       // 1) Mark to market
       value = activeCodes.reduce((s, c) => s + units[c] * priceMap[c][d], 0);
-      if (prevValue != null && prevValue > 0) rets.push([d, value / prevValue - 1]);
+      if (prevValue != null && prevValue > 0) {
+        rets.push([d, value / prevValue - 1]);
+        const row = {};
+        for (const c of Object.keys(units)) {
+          const u = units[c];
+          const p0 = priceMap[c] && priceMap[c][prev];
+          const p1 = priceMap[c] && priceMap[c][d];
+          if (!(u > 0) || !(p0 > 0) || !(p1 > 0)) continue;
+          holdingPnl[c] = (holdingPnl[c] || 0) + u * (p1 - p0);
+          row[c] = ((u * p0) / prevValue) * (p1 / p0 - 1);
+        }
+        holdRows.push(row);
+      }
 
       const newMonth = isNewMonth(prev, d);
       // Monthly MA signal (month start, previous month-end close) regardless of calendar
@@ -2790,6 +2843,26 @@ function backtest(
       // Full rebalance ONLY on real rebalance dates (calendar Q/Y/M, MOM-like monthly,
       // or band breach below). Band mode ignores the calendar.
       let doFull = bandActive ? false : isRebal(prev, d);
+
+      // Lump-sum withdrawal (first session of a new month). Off unless withdrawOn.
+      if (withdrawOn && newMonth && value > 0 && !depletionDate) {
+        const req = withdrawMode === "amount" ? withdrawAmount : value * withdrawRate;
+        const wd = Math.min(value, req);
+        if (wd > 0) {
+          totalWithdrawn += wd;
+          cfMid.push([d, wd]);
+          if (wd >= value - 1e-8) {
+            depletionDate = d;
+            value = 0;
+            units = {};
+            activeCodes = [];
+          } else {
+            const k = (value - wd) / value;
+            units = Object.fromEntries(Object.entries(units).map(([c, u]) => [c, u * k]));
+            value -= wd;
+          }
+        }
+      }
 
       // 2) Monthly DCA cash inflow on first trading day of new month
       let contrib = 0;
@@ -2799,6 +2872,7 @@ function backtest(
         value += contrib;
         totalInvested += contrib;
         contributions += 1;
+        cfMid.push([d, -contrib]);
       }
 
       // 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
@@ -2932,7 +3006,7 @@ function backtest(
   const meanEx = ex.reduce((a, b) => a + b, 0) / (ex.length || 1);
   const sharpe = std ? (meanEx / std) * Math.sqrt(252) : 0;
   const yvals = Object.values(yearly);
-  return {
+  const out = {
     start: curve[0].d,
     end: curve.at(-1).d,
     days,
@@ -2971,6 +3045,23 @@ function backtest(
     tradeCost: momCost,
     totalCostDrag,
   };
+  const retValsOnly = rets.map(([, r]) => r);
+  const sc = sortinoCalmar(retValsOnly, cagr, mdd);
+  const cfs = [[curve[0].d, -initialCapital], ...cfMid, [curve.at(-1).d, finalValue]];
+  Object.defineProperty(out, "lab", {
+    enumerable: false,
+    value: {
+      sortino: sc.sortino,
+      calmar: sc.calmar,
+      irr: xirr(cfs),
+      dailyRets: rets.map(([d, r]) => [d, r]),
+      holdings: holdingStats(holdingPnl, holdRows, retValsOnly),
+      withdraw: withdrawOn
+        ? { mode: withdrawMode, amount: withdrawAmount, rate: withdrawRate, total: totalWithdrawn, depletionDate }
+        : null,
+    },
+  });
+  return out;
 }
 
 
@@ -3081,6 +3172,11 @@ function computeDrawdown(curve, episodeThreshold = -0.05) {
   if (recoveryDate != null) endI = dateIndex[recoveryDate];
   else endI = maxDd < 0 ? pairs.length - 1 : startI;
   const underwaterDays = maxDd < 0 ? Math.max(0, endI - startI) : 0;
+  for (const ep of episodes) {
+    const a = dateIndex[ep.peakDate] ?? 0;
+    const b = ep.recoveryDate != null && dateIndex[ep.recoveryDate] != null ? dateIndex[ep.recoveryDate] : pairs.length - 1;
+    ep.underwaterDays = Math.max(0, b - a);
+  }
 
   return {
     series,
@@ -3905,6 +4001,9 @@ function currentStrategyCfg() {
     dcaOn: state.dcaOn,
     initialCapital: state.initialCapital,
     monthlyAmount: state.monthlyAmount,
+    withdrawMode: state.withdrawMode,
+    withdrawAmount: state.withdrawAmount,
+    withdrawRate: state.withdrawRate,
     totalReturn: state.totalReturn,
   };
 }
@@ -4034,7 +4133,8 @@ async function executePortBacktest(picks, start, end, cfg) {
   const priceMap = useTr
     ? buildTotalReturnPrices(state.prices, loadCodes)
     : state.prices;
-  const initial = cfg.dcaOn ? cfg.initialCapital : 1;
+  const withdrawOn = !cfg.dcaOn && cfg.withdrawMode && cfg.withdrawMode !== "none";
+  const initial = cfg.dcaOn || withdrawOn ? cfg.initialCapital : 1;
   const monthly = cfg.dcaOn ? cfg.monthlyAmount : 0;
   return backtest(Object.fromEntries(picks), priceMap, start, end, cfg.rebalance, initial, monthly, {
     lookback: cfg.momLookback,
@@ -4064,6 +4164,9 @@ async function executePortBacktest(picks, start, end, cfg) {
     sleeveTrendMode: cfg.sleeveTrendMode === "ma" ? "ma" : "abs",
     sleeveTrendLookback: Number(cfg.sleeveTrendLookback) >= 3 ? 3 : 1,
     etfFlags: etfFlagsMap(),
+    withdrawMode: withdrawOn ? cfg.withdrawMode : "none",
+    withdrawAmount: cfg.withdrawAmount,
+    withdrawRate: cfg.withdrawRate,
   });
 }
 
@@ -4393,6 +4496,427 @@ function wireComparePanel() {
 }
 
 
+
+function ymdOrd(iso) {
+  const y = Number(iso.slice(0, 4));
+  const m = Number(iso.slice(5, 7));
+  const d = Number(iso.slice(8, 10));
+  return Date.UTC(y, m - 1, d);
+}
+
+function xirr(cfs) {
+  if (!cfs || cfs.length < 2) return null;
+  const t0 = ymdOrd(cfs[0][0]);
+  const flows = cfs.map(([d, a]) => [(ymdOrd(d) - t0) / 86400000 / 365, a]);
+  let r = 0.1;
+  for (let i = 0; i < 50; i++) {
+    let f = 0;
+    let df = 0;
+    for (const [y, a] of flows) {
+      const den = Math.pow(1 + r, y);
+      f += a / den;
+      if (y !== 0) df += (-y * a) / Math.pow(1 + r, y + 1);
+    }
+    if (!(Math.abs(df) > 1e-14)) break;
+    let r2 = r - f / df;
+    if (r2 <= -0.999) r2 = (r - 0.999) / 2;
+    if (Math.abs(r2 - r) < 1e-12) {
+      r = r2;
+      break;
+    }
+    r = r2;
+  }
+  if (!Number.isFinite(r) || r <= -0.999) return null;
+  return r;
+}
+
+function sortinoCalmar(retVals, cagr, mdd) {
+  const rf = 0.03 / 252;
+  const n = retVals.length;
+  let sortino = 0;
+  if (n >= 3) {
+    let meanEx = 0;
+    for (const r of retVals) meanEx += r - rf;
+    meanEx /= n;
+    let down = 0;
+    for (const r of retVals) {
+      const x = Math.min(r - rf, 0);
+      down += x * x;
+    }
+    const dd = Math.sqrt(down / (n - 1));
+    sortino = dd ? (meanEx / dd) * Math.sqrt(252) : 0;
+  }
+  const calmar = mdd < 0 ? cagr / Math.abs(mdd) : null;
+  return { sortino, calmar };
+}
+
+function holdingStats(pnl, rows, portRets) {
+  const n = portRets.length;
+  const shares = {};
+  if (n >= 3 && rows.length === n) {
+    let mp = 0;
+    for (const r of portRets) mp += r;
+    mp /= n;
+    let variance = 0;
+    for (const r of portRets) variance += (r - mp) ** 2;
+    variance /= n - 1;
+    for (const c of Object.keys(pnl)) {
+      const series = rows.map((row) => row[c] || 0);
+      let mc = 0;
+      for (const x of series) mc += x;
+      mc /= n;
+      let cov = 0;
+      for (let i = 0; i < n; i++) cov += (series[i] - mc) * (portRets[i] - mp);
+      cov /= n - 1;
+      shares[c] = variance ? cov / variance : 0;
+    }
+  }
+  return Object.keys(pnl)
+    .sort((a, b) => pnl[b] - pnl[a])
+    .map((c) => ({ code: c, pnl: pnl[c], volShare: shares[c] == null ? null : shares[c] }));
+}
+
+function lcg(seed) {
+  return (Math.imul(1664525, seed) + 1013904223) >>> 0;
+}
+
+function qidx(p, n) {
+  const x = p * (n - 1);
+  return Math.min(n - 1, Math.max(0, Math.floor(x + 0.5)));
+}
+
+function bootstrapObserved(rets, nPaths = 300, seed = 1) {
+  const n = rets.length;
+  if (n < 5) return { error: "일별 수익률이 짧습니다", paths: 0 };
+  let s = seed >>> 0;
+  const terms = [];
+  for (let p = 0; p < nPaths; p++) {
+    let w = 1;
+    for (let i = 0; i < n; i++) {
+      s = lcg(s);
+      w *= 1 + rets[s % n];
+    }
+    terms.push(w - 1);
+  }
+  terms.sort((a, b) => a - b);
+  return {
+    paths: nPaths,
+    n,
+    p05: terms[qidx(0.05, nPaths)],
+    p50: terms[qidx(0.5, nPaths)],
+    p95: terms[qidx(0.95, nPaths)],
+    min: terms[0],
+    max: terms[terms.length - 1],
+    note: "과거를 재추출하면",
+  };
+}
+
+function relativePerformance(port, bench) {
+  const bm = Object.fromEntries(bench.map(([d, r]) => [d, r]));
+  const xs = [];
+  let upP = 0, upB = 0, dnP = 0, dnB = 0, nUp = 0, nDown = 0;
+  for (const [d, r] of port) {
+    if (!(d in bm)) continue;
+    const b = bm[d];
+    xs.push(r - b);
+    if (b > 0) {
+      upP += r;
+      upB += b;
+      nUp += 1;
+    } else if (b < 0) {
+      dnP += r;
+      dnB += b;
+      nDown += 1;
+    }
+  }
+  if (xs.length < 3) return null;
+  const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const sd = Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (xs.length - 1));
+  return {
+    excessAnn: mean * 252,
+    trackingError: sd * Math.sqrt(252),
+    informationRatio: sd ? (mean / sd) * Math.sqrt(252) : 0,
+    upCapture: upB ? upP / upB : null,
+    downCapture: dnB ? dnP / dnB : null,
+    n: xs.length,
+    nUp,
+    nDown,
+  };
+}
+
+const STRESS_WINDOWS = [
+  { id: "2020-03", label: "2020-03", start: "2020-03-01", end: "2020-03-31" },
+  { id: "2022", label: "2022", start: "2022-01-01", end: "2022-12-31" },
+];
+
+function stressDrawdowns(curve, windows = STRESS_WINDOWS) {
+  const pairs = (curve || []).map((pt) => (Array.isArray(pt) ? [pt[0], Number(pt[1])] : [pt.d, Number(pt.v)]));
+  return windows.map((w) => {
+    const sub = pairs.filter(([d]) => d >= w.start && d <= w.end);
+    if (sub.length < 2) {
+      return { ...w, status: "outside", maxDD: null, peakDate: null, troughDate: null, days: Math.max(0, sub.length - 1) };
+    }
+    const dd = computeDrawdown(sub, -1);
+    return {
+      ...w,
+      status: "ok",
+      maxDD: dd.maxDD,
+      peakDate: dd.maxDD < 0 ? dd.peakDate : sub[0][0],
+      troughDate: dd.maxDD < 0 ? dd.troughDate : sub[0][0],
+      days: sub.length - 1,
+    };
+  });
+}
+
+function realReturns(curve, yearly, totalReturn, cpi) {
+  if (!cpi || !cpi.available || !cpi.series || !cpi.series.length) {
+    return {
+      available: false,
+      reason: (cpi && cpi.blocker) || "공식 월별 CPI를 가져오지 못해 실질수익률은 꺼 두었습니다",
+    };
+  }
+  const idx = {};
+  for (const row of cpi.series) {
+    if (row.ym && typeof row.v === "number" && row.v > 0) idx[row.ym] = row.v;
+  }
+  const pairs = (curve || []).map((pt) => (Array.isArray(pt) ? [pt[0], Number(pt[1])] : [pt.d, Number(pt.v)]));
+  if (pairs.length < 2) return { available: false, reason: "곡선이 짧습니다" };
+  const c0 = idx[pairs[0][0].slice(0, 7)];
+  const c1 = idx[pairs[pairs.length - 1][0].slice(0, 7)];
+  const out = {
+    available: true,
+    source: cpi.source,
+    base: cpi.base,
+    cpiStart: c0 || null,
+    cpiEnd: c1 || null,
+    start: pairs[0][0],
+    end: pairs[pairs.length - 1][0],
+    realTotal: c0 && c1 ? (1 + totalReturn) / (c1 / c0) - 1 : null,
+    yearly: {},
+    note: c0 && c1 ? null : "시작 또는 종료 월의 CPI가 없어 누적 실질은 표시하지 않습니다",
+  };
+  const lastYm = {};
+  for (const [d] of pairs) lastYm[d.slice(0, 4)] = d.slice(0, 7);
+  let prevYm = pairs[0][0].slice(0, 7);
+  let first = true;
+  for (const y of Object.keys(yearly || {}).sort()) {
+    const thisYm = lastYm[y];
+    const nom = yearly[y];
+    const a = first ? idx[pairs[0][0].slice(0, 7)] : idx[prevYm];
+    const b = thisYm ? idx[thisYm] : null;
+    out.yearly[y] = {
+      nominal: nom,
+      real: a && b && nom != null ? (1 + nom) / (b / a) - 1 : null,
+      cpiFrom: first ? pairs[0][0].slice(0, 7) : prevYm,
+      cpiTo: thisYm,
+    };
+    if (thisYm) prevYm = thisYm;
+    first = false;
+  }
+  return out;
+}
+
+function pensionRateOf(x) {
+  const bps = Math.round(Number(x) * 10000);
+  return bps === 330 || bps === 440 || bps === 550 ? bps / 10000 : 0.044;
+}
+
+const DIV_ISA_LIMIT = 2000000;
+const DIV_ISA_EXCESS = 0.099;
+
+function divEventTax(gross, prof, taxRates, account, pensionRate, isaUsed, year, isaLimit, isaExcess) {
+  if (prof === "US_DIRECT") return gross * Number(taxRates.US_DIRECT != null ? taxRates.US_DIRECT : 0.15);
+  if (account === "pension") return gross * pensionRate;
+  if (account === "isa") {
+    const used = isaUsed[year] || 0;
+    const room = Math.max(0, isaLimit - used);
+    const excess = Math.max(0, gross - room);
+    isaUsed[year] = used + gross;
+    return excess * isaExcess;
+  }
+  return gross * Number(taxRates[prof] != null ? taxRates[prof] : taxRates.KR_LISTED != null ? taxRates.KR_LISTED : 0.154);
+}
+
+function hedgePairKey(name) {
+  return String(name || "")
+    .replace(/환헤지/g, "")
+    .replace(/\(H\)/g, "")
+    .replace(/（H）/g, "")
+    .replace(/\s+/g, "");
+}
+
+function findHedgePairs(etfs) {
+  const groups = new Map();
+  for (const e of etfs || []) {
+    if (e.leveraged) continue;
+    const flags = etfStructureFlags(e);
+    const key = `${e.issuer || ""}|${hedgePairKey(e.name)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ e, hedged: flags.hedged });
+  }
+  const pairs = [];
+  for (const arr of groups.values()) {
+    const h = arr.filter((x) => x.hedged);
+    const u = arr.filter((x) => !x.hedged);
+    if (h.length === 1 && u.length === 1) {
+      pairs.push({ hedged: h[0].e, plain: u[0].e });
+    }
+  }
+  pairs.sort((a, b) => (b.plain.marcap || 0) - (a.plain.marcap || 0));
+  return pairs;
+}
+
+
+function renderFeatPanels(r, bench, dd) {
+  const lab = r.lab || {};
+  const irr = lab.irr;
+  const irrCard = `<div class="card pad" id="irrPanel"><div class="section-title">납입 시점 IRR</div><div class="kpis">${kpi("현금흐름 IRR", irr == null ? "—" : pct(irr), cls(irr || 0))}${kpi("연환산(납입 합)", pct(r.cagr), cls(r.cagr))}</div><p class="muted-note">현금흐름 IRR은 납입·인출이 있던 날짜를 달력 365로 반영한 금액가중 수익률입니다. 연환산(납입 합)은 기말÷납입 합을 252거래일로 환산한 값이라, 적립이나 인출이 있으면 둘은 다릅니다. 과거 시뮬.</p></div>`;
+  let wd = "";
+  if (lab.withdraw) {
+    const w = lab.withdraw;
+    const hit = w.depletionDate
+      ? `과거 기준 이 속도면 ${w.depletionDate}에 바닥.`
+      : `이 과거 창(${r.start} ~ ${r.end})에서는 잔액이 0이 되지 않았습니다.`;
+    const how = w.mode === "amount" ? `매월 정액 ${won(w.amount)}` : `매월 잔액의 ${(w.rate * 100).toFixed(2)}%`;
+    wd = `<div class="card pad" id="withdrawPanel"><div class="section-title">인출 잔액 경로</div><p>${how} · 인출 합 ${won(w.total)} · 기말 잔액 ${won(r.finalValue)}</p><p><strong>${hit}</strong></p><p class="muted-note">위 곡선이 잔액 경로입니다(인출 후). 인출일 매도 비용은 넣지 않았습니다. 이 창의 과거 경로이며 앞으로를 말하지 않습니다.</p></div>`;
+  }
+  let rel = "";
+  if (bench && !bench.error && bench.lab && lab.dailyRets) {
+    const rp = relativePerformance(lab.dailyRets, bench.lab.dailyRets);
+    const code = (bench.codes && bench.codes[0]) || state.benchCode || BENCH;
+    const name = (etfByCode(code) || {}).name || code;
+    if (rp) {
+      rel = `<div class="card pad" id="relPanel"><div class="section-title">상대 성과 · ${name}</div><div class="kpis">${kpi("초과수익(연)", pct(rp.excessAnn), cls(rp.excessAnn))}${kpi("추적오차", pct(rp.trackingError), "")}${kpi("정보비율", rp.informationRatio.toFixed(2), cls(rp.informationRatio))}${kpi("상승포착", rp.upCapture == null ? "—" : pct(rp.upCapture, 2), "")}${kpi("하락포착", rp.downCapture == null ? "—" : pct(rp.downCapture, 2), "")}</div><p class="muted-note">고른 ETF 수정주가의 일별 수익률과 포트 일별 수익률(현금흐름 전)의 차이입니다. 지수 대비 NAV 추적오차가 아닙니다. 초과수익은 일별 차이의 252배입니다. 과거 시뮬 · 투자 자문 아님.</p></div>`;
+    }
+  }
+  const eps = (dd.episodes || []).slice().sort((a, b) => a.depth - b.depth).slice(0, 8);
+  const erows = eps
+    .map(
+      (ep) =>
+        `<tr><td>${ep.peakDate}</td><td>${ep.troughDate}</td><td>${ep.recoveryDate || "창 끝 미회복"}</td><td>${ep.underwaterDays != null ? ep.underwaterDays : "—"}</td><td class="neg">${pct(ep.depth)}</td></tr>`
+    )
+    .join("");
+  const epCard = `<div class="card pad" id="episodePanel"><div class="section-title">낙폭 구간</div><table><thead><tr><th>고점</th><th>저점</th><th>회복</th><th>수중 일수</th><th>깊이</th></tr></thead><tbody>${erows || `<tr><td colspan="5">깊이 5%를 넘는 구간이 없습니다.</td></tr>`}</tbody></table><p class="muted-note">수중 차트와 같은 경로에서 고점 대비 −5%보다 깊은 구간만, 깊은 순으로 최대 8개입니다. 과거 시뮬.</p></div>`;
+  const holds = lab.holdings || [];
+  const hrows = holds
+    .map((h) => {
+      const etf = etfByCode(h.code);
+      const pnlTxt = r.initialCapital > 1 ? won(h.pnl) : `${h.pnl >= 0 ? "+" : ""}${h.pnl.toFixed(4)}`;
+      const vs = h.volShare == null ? "—" : pct(h.volShare, 1);
+      return `<tr><td>${h.code}</td><td>${etf ? etf.name : h.code}</td><td class="${cls(h.pnl)}">${pnlTxt}</td><td>${vs}</td></tr>`;
+    })
+    .join("");
+  const holdCard = `<div class="card pad" id="holdPanel"><div class="section-title">종목별 손익 · 변동성 몫</div><table><thead><tr><th>코드</th><th>이름</th><th>누적 가격손익</th><th>변동성 몫</th></tr></thead><tbody>${hrows || `<tr><td colspan="4">—</td></tr>`}</tbody></table><p class="muted-note">누적 가격손익은 보유 수량×가격 변화의 합입니다. 납입·인출은 손익에 넣지 않습니다. 변동성 몫은 그 종목의 일별 기여와 포트 수익률의 공분산 비중입니다. 구성 주식은 나누지 않습니다. 과거 시뮬.</p></div>`;
+  const real = realReturns(r.curve, r.yearly, r.totalRet, state.cpi);
+  const realCard = !real.available
+    ? `<div class="card pad" id="realPanel"><div class="section-title">실질(물가) 수익률 · 꺼짐</div><p class="muted-note">${real.reason || "공식 CPI 없음"} 물가 숫자는 만들지 않았습니다.</p></div>`
+    : `<div class="card pad" id="realPanel"><div class="section-title">실질(물가) 수익률</div><p>누적 실질 ${real.realTotal == null ? "—" : pct(real.realTotal, 2)}</p><table><thead><tr><th>연도</th><th>명목</th><th>실질</th></tr></thead><tbody>${Object.keys(real.yearly).sort().map((y) => { const row = real.yearly[y]; return `<tr><td>${y}</td><td class="${cls(row.nominal)}">${pct(row.nominal, 2)}</td><td>${row.real == null ? "—" : pct(row.real, 2)}</td></tr>`; }).join("")}</tbody></table><p class="muted-note">${real.source || ""} ${real.note || ""} CPI가 없는 달은 비웁니다. 과거 시뮬.</p></div>`;
+  const boot = `<div class="card pad" id="bootPanel"><div class="section-title">과거 일별 수익률 재추출</div><button type="button" class="secondary" id="btnBootstrap">재추출 보기</button><div id="bootOut" class="muted-note">관측된 일별 수익률을 같은 길이로 다시 뽑습니다. 과거를 재추출하면 누적 수익률이 어떻게 퍼지는지만 보여 줍니다.</div></div>`;
+  const stress = stressDrawdowns(r.curve);
+  const srows = stress
+    .map(
+      (w) =>
+        `<tr><td>${w.label}</td><td>${w.status === "ok" ? pct(w.maxDD) : "구간 밖"}</td><td>${w.peakDate || "—"}</td><td>${w.troughDate || "—"}</td><td>${w.days}</td></tr>`
+    )
+    .join("");
+  const stressCard = `<div class="card pad" id="stressPanel"><div class="section-title">고정 구간 낙폭</div><table><thead><tr><th>구간</th><th>낙폭</th><th>고점</th><th>저점</th><th>거래일</th></tr></thead><tbody>${srows}</tbody></table><p class="muted-note">같은 포트 곡선에서 그 날짜 안의 고점과 저점만 계산했습니다. 창 밖이면 숫자를 만들지 않습니다. 과거 시뮬.</p></div>`;
+  const hedge = `<div class="card pad" id="hedgePanel"><div class="section-title">환헤지 · 비헤지</div><div id="hedgeOut"><p class="muted-note">왼쪽에서 쌍을 고르면 같은 창의 KRW 결과를 나란히 계산합니다.</p></div></div>`;
+  return irrCard + wd + rel + epCard + holdCard + realCard + boot + stressCard + hedge;
+}
+
+function wireFeatPanels(r) {
+  const btn = $("#btnBootstrap");
+  if (btn) {
+    btn.onclick = () => {
+      const rets = ((r.lab && r.lab.dailyRets) || []).map((x) => x[1]);
+      const b = bootstrapObserved(rets, 300, 1);
+      const host = $("#bootOut");
+      if (!host) return;
+      if (b.error) {
+        host.textContent = b.error;
+        return;
+      }
+      host.innerHTML = `과거를 재추출하면 (관측 ${b.n}일 × ${b.paths}번, 같은 길이) 누적 수익률 5% ${pct(b.p05)} · 가운데 ${pct(b.p50)} · 95% ${pct(b.p95)} · 범위 ${pct(b.min)} ~ ${pct(b.max)}. 다시 뽑은 과거일 뿐, 앞으로의 분포가 아닙니다.`;
+    };
+  }
+  renderHedgeResult(r);
+}
+
+async function renderHedgeResult(r) {
+  const host = $("#hedgeOut");
+  if (!host || !r || r.error) return;
+  const pairs = findHedgePairs((state.meta && state.meta.etfs) || []);
+  const pair = pairs.find((p) => `${p.hedged.code}|${p.plain.code}` === state.hedgePair);
+  if (!pair) {
+    host.innerHTML = pairs.length
+      ? `<p class="muted-note">같은 기초 쌍 ${pairs.length}개. 왼쪽에서 고르면 ${r.start}~${r.end} KRW 수정주가를 나란히 계산합니다. 리밸 없음.</p>`
+      : `<p class="muted-note">메타에서 같은 운용사·같은 기초의 환헤지/비헤지 쌍을 찾지 못했습니다.</p>`;
+    return;
+  }
+  host.textContent = "계산 중…";
+  await ensurePrices([pair.hedged.code, pair.plain.code]);
+  if (!state.prices[pair.hedged.code] || !state.prices[pair.plain.code]) {
+    host.textContent = "한쪽 시세가 없습니다.";
+    return;
+  }
+  let h = backtest({ [pair.hedged.code]: 100 }, state.prices, r.start, r.end, "N", 1, 0);
+  let u = backtest({ [pair.plain.code]: 100 }, state.prices, r.start, r.end, "N", 1, 0);
+  if (h.error || u.error) {
+    host.textContent = h.error || u.error;
+    return;
+  }
+  const start = h.start > u.start ? h.start : u.start;
+  const end = h.end < u.end ? h.end : u.end;
+  h = backtest({ [pair.hedged.code]: 100 }, state.prices, start, end, "N", 1, 0);
+  u = backtest({ [pair.plain.code]: 100 }, state.prices, start, end, "N", 1, 0);
+  let fxLine = "";
+  if (state.showFx && state.fxRows && state.fxRows.length) {
+    const rows = state.fxRows.filter((row) => row[0] >= h.start && row[0] <= h.end);
+    if (rows.length >= 2) {
+      const a = rows[0][1];
+      const b = rows[rows.length - 1][1];
+      fxLine = `<p class="muted-note">같은 창 USDKRW ${rows[0][0]} ${a} → ${rows[rows.length - 1][0]} ${b} (${pct(b / a - 1)}). 두 ETF 차이와 같지 않을 수 있습니다(보수·롤·추적).</p>`;
+    } else fxLine = `<p class="muted-note">이 창의 USDKRW 행이 없습니다.</p>`;
+  }
+  host.innerHTML = `<table><thead><tr><th></th><th>${pair.hedged.name}</th><th>${pair.plain.name}</th></tr></thead><tbody>
+    <tr><td>코드</td><td>${pair.hedged.code} · 환헤지</td><td>${pair.plain.code}</td></tr>
+    <tr><td>창</td><td colspan="2">${h.start} ~ ${h.end}</td></tr>
+    <tr><td>누적</td><td class="${cls(h.totalRet)}">${pct(h.totalRet, 2)}</td><td class="${cls(u.totalRet)}">${pct(u.totalRet, 2)}</td></tr>
+    <tr><td>연환산</td><td class="${cls(h.cagr)}">${pct(h.cagr)}</td><td class="${cls(u.cagr)}">${pct(u.cagr)}</td></tr>
+    <tr><td>최대낙폭</td><td class="neg">${pct(h.mdd)}</td><td class="neg">${pct(u.mdd)}</td></tr>
+  </tbody></table><p class="muted-note">둘 다 KRW 수정주가, 100% 보유, 리밸 없음, 같은 날짜 창. 과거 시뮬.</p>${fxLine}`;
+}
+
+function renderBenchOptions() {
+  const sel = $("#benchCode");
+  if (!sel || !state.meta) return;
+  const etfs = state.meta.etfs.filter((e) => !e.leveraged);
+  etfs.sort((a, b) => (b.marcap || 0) - (a.marcap || 0));
+  const cur = state.benchCode || BENCH;
+  sel.innerHTML = etfs
+    .map((e) => `<option value="${e.code}" ${e.code === cur ? "selected" : ""}>${e.code} ${e.name}</option>`)
+    .join("");
+  if (![...sel.options].some((o) => o.value === cur) && etfByCode(cur)) {
+    sel.insertAdjacentHTML("afterbegin", `<option value="${cur}" selected>${cur}</option>`);
+  }
+  sel.value = cur;
+}
+
+function renderHedgeOptions() {
+  const sel = $("#hedgePair");
+  if (!sel || !state.meta) return;
+  const pairs = findHedgePairs(state.meta.etfs);
+  const cur = state.hedgePair || "";
+  sel.innerHTML =
+    `<option value="">쌍 선택 안 함</option>` +
+    pairs
+      .map((p) => {
+        const v = `${p.hedged.code}|${p.plain.code}`;
+        return `<option value="${v}" ${v === cur ? "selected" : ""}>${p.plain.name} ↔ ${p.hedged.name}</option>`;
+      })
+      .join("");
+}
+
 function renderResult(r, bench, picks, corr, tax, windowInfo) {
   const host = $("#result");
   if (r.error) {
@@ -4464,13 +4988,20 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
-  host.innerHTML = `${exportBar}${portLineHtml(picks)}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${volTargetNote}${sleeveTrendNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 벤치마크 KODEX 200</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th>KODEX 200</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
+  host.innerHTML = `${exportBar}${portLineHtml(picks)}<div class="kpis">${kpi("연환산 수익률", pct(r.cagr), cls(r.cagr))}${kpi("누적 수익률", pct(r.totalRet, 2), cls(r.totalRet))}${kpi("최대낙폭", pct(r.mdd), "neg")}${kpi("변동성", pct(r.vol, 1), "")}${kpi("샤프", r.sharpe.toFixed(2), cls(r.sharpe))}${kpi("소르티노", (r.lab && Number.isFinite(r.lab.sortino) ? r.lab.sortino : 0).toFixed(2), cls(r.lab && r.lab.sortino))}${kpi("칼마", r.lab && r.lab.calmar != null ? r.lab.calmar.toFixed(2) : "—", cls(r.lab && r.lab.calmar))}</div>${winCard}<div class="card chart-wrap"><canvas id="curve"></canvas></div>${dcaNote}${trNote}${costNote}${regimeNote}${hedgeNote}${goldNote}${volTargetNote}${sleeveTrendNote}${weightNote}${bandNote}${momTable}${renderDrawdownCard(dd, benchDd)}${renderFeatPanels(r, bench, dd, picks)}${renderRollingCard()}${renderSensitivityCard()}${renderCorrCard(corr)}${renderTaxCard(tax)}<div class="bottom"><div class="card pad"><div class="section-title">연도별 수익률 · 비교 ETF</div><table><thead><tr><th>연도</th><th>포트폴리오</th><th id="benchColName">비교</th></tr></thead><tbody>${yearlyRows}</tbody></table><div class="warn">연도별은 전년 말(또는 백테스트 시작) 대비 해당 연 말. 일괄매수(lump)는 연도 복리 합 = 누적 수익률.</div>${partialNote}<div class="warn">공통 기간 ${r.start} ~ ${r.end} · ${r.days}거래일 · ${retLabel}</div></div><div class="card pad"><div class="section-title">리뷰 에이전트</div><div class="agent" id="agentText"></div></div></div>`;
   drawChart(r, bench);
   drawDrawdownChart(dd, benchDd);
   drawRollingChart(r.curve, state.rollingWindow);
   wireRollingChips();
   wireSensitivityCard();
   wireExportBar();
+  wireFeatPanels(r, bench);
+  const benchNameEl = $("#benchColName");
+  if (benchNameEl) {
+    const code = state.benchCode || BENCH;
+    const etf = etfByCode(code);
+    benchNameEl.textContent = etf ? etf.name : code;
+  }
   $("#agentText").textContent = reviewAgent(r, bench, picks);
 }
 
@@ -4789,6 +5320,13 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#dcaOn").onchange = (e) => {
     state.dcaOn = e.target.checked;
     $("#dcaInputs").style.display = state.dcaOn ? "flex" : "none";
+    if (state.dcaOn && state.withdrawMode !== "none") {
+      state.withdrawMode = "none";
+      const wm = $("#withdrawMode");
+      if (wm) wm.value = "none";
+      const box = $("#withdrawInputs");
+      if (box) box.style.display = "none";
+    }
   };
   $("#initialCapital").onchange = (e) => {
     state.initialCapital = Math.max(1, Number(e.target.value) || 1);
@@ -4796,6 +5334,54 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#monthlyAmount").onchange = (e) => {
     state.monthlyAmount = Math.max(0, Number(e.target.value) || 0);
   };
+  const syncWithdrawUi = () => {
+    const mode = state.withdrawMode || "none";
+    const box = $("#withdrawInputs");
+    if (box) box.style.display = mode === "none" ? "none" : "flex";
+    const af = $("#withdrawAmountField");
+    const rf = $("#withdrawRateField");
+    if (af) af.style.display = mode === "amount" ? "" : "none";
+    if (rf) rf.style.display = mode === "rate" ? "" : "none";
+    if (mode !== "none" && $("#dcaOn")?.checked) {
+      $("#dcaOn").checked = false;
+      state.dcaOn = false;
+      const di = $("#dcaInputs");
+      if (di) di.style.display = "none";
+    }
+  };
+  const wm = $("#withdrawMode");
+  if (wm) {
+    wm.onchange = (e) => {
+      state.withdrawMode = e.target.value === "amount" || e.target.value === "rate" ? e.target.value : "none";
+      syncWithdrawUi();
+    };
+  }
+  const wi = $("#withdrawInitial");
+  if (wi) wi.onchange = (e) => { state.initialCapital = Math.max(1, Number(e.target.value) || 1); };
+  const wa = $("#withdrawAmount");
+  if (wa) wa.onchange = (e) => { state.withdrawAmount = Math.max(0, Number(e.target.value) || 0); };
+  const wr = $("#withdrawRatePct");
+  if (wr) wr.onchange = (e) => { state.withdrawRate = Math.max(0, Math.min(1, (Number(e.target.value) || 0) / 100)); };
+  const af = $("#aumFloor");
+  if (af) af.onchange = (e) => { state.aumFloor = Math.max(0, Number(e.target.value) || 0); renderList(); };
+  const bc = $("#benchCode");
+  if (bc) bc.onchange = (e) => { state.benchCode = e.target.value || BENCH; };
+  const hp = $("#hedgePair");
+  if (hp) hp.onchange = (e) => {
+    state.hedgePair = e.target.value || "";
+    if (state.lastRun && state.lastRun.result && !state.lastRun.result.error) renderHedgeResult(state.lastRun.result);
+  };
+  const sf = $("#showFx");
+  if (sf) sf.onchange = (e) => {
+    state.showFx = !!e.target.checked;
+    if (state.lastRun && state.lastRun.result && !state.lastRun.result.error) renderHedgeResult(state.lastRun.result);
+  };
+  document.querySelectorAll("input[name=divAccount]").forEach((el) => {
+    el.onchange = () => {
+      const row = $("#divPensionRow");
+      if (row) row.style.display = el.value === "pension" && el.checked ? "flex" : document.querySelector("input[name=divAccount]:checked")?.value === "pension" ? "flex" : "none";
+    };
+  });
   const tcSlider = $("#tradeCost");
   if (tcSlider) {
     const syncTc = (e) => {
@@ -4909,6 +5495,11 @@ function backtestDividend(weights, data, start, end, rebalance, initialCapital =
   const mode = opts.mode === "reinvest" ? "reinvest" : "cash";
   const cost = clampTradeCost(opts.cost != null ? opts.cost : TRADE_COST_DEFAULT);
   const taxRates = { ...DIV_TAX_RATES, ...(opts.taxRates || {}) };
+  const account = opts.account === "isa" || opts.account === "pension" ? opts.account : "general";
+  const pensionRate = pensionRateOf(opts.pensionRate != null ? opts.pensionRate : 0.044);
+  const isaLimit = Number(opts.isaLimit) > 0 ? Number(opts.isaLimit) : DIV_ISA_LIMIT;
+  const isaExcess = opts.isaExcessRate != null ? Number(opts.isaExcessRate) : DIV_ISA_EXCESS;
+  const isaUsed = {};
   const bandOn = !!opts.bandOn;
   const bandPct = bandOn ? clampBandPct(opts.bandPct) : 0;
   const codes = Object.keys(weights).filter((c) => weights[c] > 0);
@@ -4992,8 +5583,7 @@ function backtestDividend(weights, data, start, end, rebalance, initialCapital =
         const native = u * e.amt;
         const gross = native * fx;
         const prof = data.div[c].taxProfile || "KR_LISTED";
-        const rate = Number(taxRates[prof] || 0);
-        const tax = gross * rate;
+        const tax = divEventTax(gross, prof, taxRates, account, pensionRate, isaUsed, e.ex.slice(0, 4), isaLimit, isaExcess);
         const net = gross - tax;
         const rec = { ex: e.ex, d, code: c, amt: e.amt, units: u, fx, native, gross, tax, net, src: e.src };
         if (mode === "cash") {
@@ -5207,6 +5797,10 @@ function backtestDividend(weights, data, start, end, rebalance, initialCapital =
     dcaBuyCount: dcaCount,
     reinvestCount,
     taxRates,
+    account,
+    pensionRate: account === "pension" ? pensionRate : null,
+    isaLimit: account === "isa" ? isaLimit : null,
+    isaExcessRate: account === "isa" ? isaExcess : null,
     dividends: {
       months: monthList,
       years,
@@ -5396,6 +5990,8 @@ function divReadControls() {
     bandPct: Math.max(1, Math.min(10, Number($("#divBandPct")?.value) || 5)) / 100,
     initial: Math.max(10000, Number($("#divInitial")?.value) || 100000000),
     monthly: Math.max(0, Number($("#divMonthly")?.value) || 0),
+    account: document.querySelector("input[name=divAccount]:checked")?.value || "general",
+    pensionRate: pensionRateOf($("#divPensionRate")?.value || 0.044),
   };
 }
 
@@ -5443,7 +6039,7 @@ async function divRun() {
     await divLoadMeta();
     const ctl = divReadControls();
     const p = divState.preset ? DIV_PRESETS[divState.preset] : null;
-    const opts = { mode: divState.mode, bandOn: ctl.bandOn, bandPct: ctl.bandPct, cost: clampTradeCost(state.tradeCost) };
+    const opts = { mode: divState.mode, bandOn: ctl.bandOn, bandPct: ctl.bandPct, cost: clampTradeCost(state.tradeCost), account: ctl.account || "general", pensionRate: ctl.pensionRate };
     if (p && p.compare) {
       const codes = [...new Set(p.compare.flatMap((l) => Object.keys(l.w)))];
       await divEnsureData(codes);
@@ -5643,7 +6239,11 @@ function divByCodeTable(r) {
 function divNotes(codes, r) {
   const notes = [
     "배당락일 기준 집계: 분배금은 배당락일이 속한 달로 묶었습니다(실제 지급일은 보통 미국 3–5일, 국내 1–5일 뒤).",
-    "일반계좌 가정 · ISA·연금계좌 미반영. 미국 직투 분배금은 미국 원천징수 15%만 반영(국내 배당소득세율 14% < 15%라 추가 징수 없음 가정), 국내상장 ETF 분배금은 15.4% 단순 적용.",
+    r.account === "isa"
+      ? "ISA 가정 · 국내상장 분배금은 연 200만 원까지 0, 초과분 9.9% 분리과세. 미국 직투 원천 15%는 그대로. 금융소득종합과세·건강보험료는 넣지 않았습니다."
+      : r.account === "pension"
+        ? `연금 인출세 가정 · 국내상장 분배금 ${((r.pensionRate || 0.044) * 100).toFixed(1)}%(3.3–5.5 범위). 미국 직투 원천 15%는 그대로. 금융소득종합과세·건강보험료는 넣지 않았습니다.`
+        : "일반계좌 가정 · 미국 직투 분배금은 미국 원천징수 15%만 반영(국내 배당소득세율 14% < 15%라 추가 징수 없음 가정), 국내상장 ETF 분배금은 15.4% 단순 적용.",
     "2025.1부터 국내상장 해외 ETF는 외국납부세액을 펀드 단계 환급 대신 투자자 원천징수 단계에서 차감하는 방식으로 바뀌었습니다. 일반계좌 결과는 대체로 비슷하지만 실제 세액은 ETF별 외국납부세액·주당 과세표준액 기준으로 달라질 수 있습니다.",
     "매매차익 세금은 이 시뮬에 반영하지 않았습니다: 해외 직투는 연 250만원 기본공제 후 양도소득세 22%, 국내상장 해외형은 매매차익(과표 기준)에 배당소득세 15.4%, 국내주식형은 매매차익 비과세.",
     "연간 금융소득(이자+배당)이 2,000만원을 넘으면 금융소득종합과세 대상입니다(이 시뮬은 계산하지 않고 안내만).",
@@ -5783,6 +6383,11 @@ function divEncodeHash(st) {
   if (st.initial && Number(st.initial) !== DIV_INITIAL_DEFAULT) p.set("dic", String(Math.round(st.initial)));
   if (st.monthly && Number(st.monthly) > 0) p.set("dmo", String(Math.round(st.monthly)));
   if (st.tcBps != null && Math.round(st.tcBps) !== Math.round(TRADE_COST_DEFAULT * 10000)) p.set("tc", String(Math.round(st.tcBps)));
+  if (st.account === "isa") p.set("da", "isa");
+  else if (st.account === "pension") {
+    p.set("da", "pen");
+    p.set("dpr", String(Math.round((st.pensionRate || 0.044) * 10000)));
+  }
   return p.toString();
 }
 
@@ -5826,6 +6431,9 @@ function divDecodeHash(hash) {
   out.monthly = q.get("dmo") && Number.isFinite(mo) ? Math.max(0, Math.round(mo)) : 0;
   const tc = Number(q.get("tc"));
   out.tcBps = q.get("tc") != null && q.get("tc") !== "" && Number.isFinite(tc) ? Math.max(0, Math.min(50, Math.round(tc))) : Math.round(TRADE_COST_DEFAULT * 10000);
+  out.account = q.get("da") === "isa" ? "isa" : q.get("da") === "pen" ? "pension" : "general";
+  const dpr = Number(q.get("dpr"));
+  out.pensionRate = pensionRateOf(Number.isFinite(dpr) && dpr > 1 ? dpr / 10000 : 0.044);
   return out;
 }
 
@@ -5846,6 +6454,8 @@ function divCurrentShareState() {
     initial: ctl.initial,
     monthly: ctl.monthly,
     tcBps: Math.round(clampTradeCost(state.tradeCost) * 10000),
+    account: ctl.account || "general",
+    pensionRate: ctl.pensionRate,
   };
 }
 
@@ -5904,6 +6514,11 @@ async function divApplyShareState(st) {
   setV("divMonthly", String(st.monthly));
   divSetRadio("divMode", st.mode);
   divSetRadio("divTaxView", st.taxView);
+  divSetRadio("divAccount", st.account || "general");
+  const pr = $("#divPensionRate");
+  if (pr && st.pensionRate) pr.value = String(st.pensionRate);
+  const prow = $("#divPensionRow");
+  if (prow) prow.style.display = st.account === "pension" ? "flex" : "none";
   state.tradeCost = clampTradeCost(st.tcBps / 10000);
   const tcEl = $("#tradeCost");
   if (tcEl) tcEl.value = String(st.tcBps);

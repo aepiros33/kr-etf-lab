@@ -26,6 +26,7 @@ import json
 import math
 import statistics
 from dataclasses import dataclass, asdict
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -814,6 +815,251 @@ def _one_way_turnover(w_old: dict[str, float], w_new: dict[str, float]) -> float
     return 0.5 * s
 
 
+
+def _ymd_ord(s: str) -> int:
+    y, m, d = int(s[0:4]), int(s[5:7]), int(s[8:10])
+    return date(y, m, d).toordinal()
+
+
+def _xirr(cfs: list[tuple[str, float]]) -> float | None:
+    """Money-weighted IRR. Outflows negative, inflows positive. Calendar/365."""
+    if not cfs or len(cfs) < 2:
+        return None
+    t0 = _ymd_ord(cfs[0][0])
+    flows = [((_ymd_ord(d) - t0) / 365.0, a) for d, a in cfs]
+    r = 0.1
+    for _ in range(50):
+        f = 0.0
+        df = 0.0
+        for y, a in flows:
+            den = (1.0 + r) ** y
+            f += a / den
+            if y != 0.0:
+                df += -y * a / (1.0 + r) ** (y + 1.0)
+        if not (abs(df) > 1e-14):
+            break
+        r2 = r - f / df
+        if r2 <= -0.999:
+            r2 = (r - 0.999) / 2.0
+        if abs(r2 - r) < 1e-12:
+            r = r2
+            break
+        r = r2
+    if not math.isfinite(r) or r <= -0.999:
+        return None
+    return r
+
+
+def _sortino_calmar(ret_vals: list[float], cagr: float, mdd: float, rf_annual: float = 0.03):
+    rf = rf_annual / 252.0
+    n = len(ret_vals)
+    sortino = 0.0
+    if n >= 3:
+        mean_ex = sum(r - rf for r in ret_vals) / n
+        down = sum(min(r - rf, 0.0) ** 2 for r in ret_vals)
+        dd = math.sqrt(down / (n - 1))
+        sortino = (mean_ex / dd) * math.sqrt(252.0) if dd else 0.0
+    calmar = (cagr / abs(mdd)) if mdd < 0 else None
+    return sortino, calmar
+
+
+def _holding_stats(pnl: dict[str, float], rows: list[dict[str, float]], port_rets: list[float]):
+    n = len(port_rets)
+    shares: dict[str, float | None] = {}
+    if n >= 3 and len(rows) == n:
+        mp = sum(port_rets) / n
+        var = sum((r - mp) ** 2 for r in port_rets) / (n - 1)
+        for c in pnl:
+            series = [row.get(c, 0.0) for row in rows]
+            mc = sum(series) / n
+            cov = sum((series[i] - mc) * (port_rets[i] - mp) for i in range(n)) / (n - 1)
+            shares[c] = (cov / var) if var else 0.0
+    codes = sorted(pnl.keys(), key=lambda c: -pnl[c])
+    return [{"code": c, "pnl": pnl[c], "volShare": shares.get(c)} for c in codes]
+
+
+def _lcg(seed: int) -> int:
+    return (1664525 * seed + 1013904223) & 0xFFFFFFFF
+
+
+def _qidx(p: float, n: int) -> int:
+    x = p * (n - 1)
+    return min(n - 1, max(0, int(math.floor(x + 0.5))))
+
+
+def bootstrap_observed(rets: list[float], n_paths: int = 300, seed: int = 1) -> dict:
+    """Resample observed daily returns with replacement, same length. Not a forecast."""
+    n = len(rets)
+    if n < 5:
+        return {"error": "일별 수익률이 짧습니다", "paths": 0}
+    s = seed & 0xFFFFFFFF
+    terms = []
+    for _ in range(n_paths):
+        w = 1.0
+        for _i in range(n):
+            s = _lcg(s)
+            w *= 1.0 + rets[s % n]
+        terms.append(w - 1.0)
+    terms.sort()
+    return {
+        "paths": n_paths,
+        "n": n,
+        "p05": terms[_qidx(0.05, n_paths)],
+        "p50": terms[_qidx(0.50, n_paths)],
+        "p95": terms[_qidx(0.95, n_paths)],
+        "min": terms[0],
+        "max": terms[-1],
+        "note": "과거를 재추출하면",
+    }
+
+
+def relative_performance(port, bench) -> dict | None:
+    """ETF-vs-ETF daily excess. Not NAV-versus-index tracking error."""
+    bm = {d: r for d, r in bench}
+    xs = []
+    up_p = up_b = dn_p = dn_b = 0.0
+    n_up = n_dn = 0
+    for d, r in port:
+        if d not in bm:
+            continue
+        b = bm[d]
+        xs.append(r - b)
+        if b > 0:
+            up_p += r
+            up_b += b
+            n_up += 1
+        elif b < 0:
+            dn_p += r
+            dn_b += b
+            n_dn += 1
+    if len(xs) < 3:
+        return None
+    sd = statistics.stdev(xs)
+    mean = sum(xs) / len(xs)
+    return {
+        "excessAnn": mean * 252.0,
+        "trackingError": sd * math.sqrt(252.0),
+        "informationRatio": (mean / sd) * math.sqrt(252.0) if sd else 0.0,
+        "upCapture": (up_p / up_b) if up_b else None,
+        "downCapture": (dn_p / dn_b) if dn_b else None,
+        "n": len(xs),
+        "nUp": n_up,
+        "nDown": n_dn,
+    }
+
+
+STRESS_WINDOWS = [
+    {"id": "2020-03", "label": "2020-03", "start": "2020-03-01", "end": "2020-03-31"},
+    {"id": "2022", "label": "2022", "start": "2022-01-01", "end": "2022-12-31"},
+]
+
+
+def stress_drawdowns(curve, windows=None) -> list[dict]:
+    pairs = _curve_pairs(curve)
+    out = []
+    for w in windows or STRESS_WINDOWS:
+        sub = [(d, v) for d, v in pairs if w["start"] <= d <= w["end"]]
+        if len(sub) < 2:
+            out.append({**w, "status": "outside", "maxDD": None, "peakDate": None, "troughDate": None, "days": max(0, len(sub) - 1)})
+            continue
+        dd = compute_drawdown(sub, episode_threshold=-1.0)
+        out.append({
+            **w,
+            "status": "ok",
+            "maxDD": dd["maxDD"],
+            "peakDate": dd["peakDate"] if dd["maxDD"] < 0 else sub[0][0],
+            "troughDate": dd["troughDate"] if dd["maxDD"] < 0 else sub[0][0],
+            "days": len(sub) - 1,
+        })
+    return out
+
+
+def load_cpi() -> dict:
+    path = DATA / "cpi_kr.json"
+    if not path.exists():
+        return {"available": False, "series": [], "blocker": "data/cpi_kr.json 없음"}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def real_returns(curve, yearly: dict, total_return: float, cpi: dict | None) -> dict:
+    if not cpi or not cpi.get("available") or not cpi.get("series"):
+        return {
+            "available": False,
+            "reason": (cpi or {}).get("blocker") or "공식 월별 CPI를 가져오지 못해 실질수익률은 꺼 두었습니다",
+        }
+    idx = {}
+    for row in cpi["series"]:
+        ym = row.get("ym")
+        v = row.get("v")
+        if ym and isinstance(v, (int, float)) and v > 0:
+            idx[str(ym)] = float(v)
+    pairs = _curve_pairs(curve)
+    if len(pairs) < 2:
+        return {"available": False, "reason": "곡선이 짧습니다"}
+    c0 = idx.get(pairs[0][0][:7])
+    c1 = idx.get(pairs[-1][0][:7])
+    out = {
+        "available": True,
+        "source": cpi.get("source"),
+        "base": cpi.get("base"),
+        "cpiStart": c0,
+        "cpiEnd": c1,
+        "start": pairs[0][0],
+        "end": pairs[-1][0],
+        "realTotal": None,
+        "yearly": {},
+        "note": None,
+    }
+    if c0 and c1:
+        out["realTotal"] = (1.0 + total_return) / (c1 / c0) - 1.0
+    else:
+        out["note"] = "시작 또는 종료 월의 CPI가 없어 누적 실질은 표시하지 않습니다"
+    last_ym = {}
+    for d, _v in pairs:
+        last_ym[d[:4]] = d[:7]
+    prev_ym = pairs[0][0][:7]
+    first = True
+    for y in sorted(yearly):
+        this_ym = last_ym.get(y)
+        nom = yearly[y]
+        a = idx.get(pairs[0][0][:7]) if first else idx.get(prev_ym)
+        b = idx.get(this_ym) if this_ym else None
+        real = None
+        if a and b and nom is not None:
+            real = (1.0 + nom) / (b / a) - 1.0
+        out["yearly"][y] = {"nominal": nom, "real": real, "cpiFrom": pairs[0][0][:7] if first else prev_ym, "cpiTo": this_ym}
+        if this_ym:
+            prev_ym = this_ym
+        first = False
+    return out
+
+
+DIV_ISA_LIMIT = 2_000_000.0
+DIV_ISA_EXCESS = 0.099
+
+
+def _pension_rate(x) -> float:
+    try:
+        bps = int(round(float(x) * 10000))
+    except (TypeError, ValueError):
+        return 0.044
+    return bps / 10000.0 if bps in (330, 440, 550) else 0.044
+
+
+def _div_event_tax(gross, prof, tax_rates, account, pension_rate, isa_used, year, isa_limit, isa_excess) -> float:
+    if prof == "US_DIRECT":
+        return gross * float(tax_rates.get("US_DIRECT", 0.15))
+    if account == "pension":
+        return gross * float(pension_rate)
+    if account == "isa":
+        used = float(isa_used.get(year, 0.0))
+        room = max(0.0, float(isa_limit) - used)
+        excess = max(0.0, gross - room)
+        isa_used[year] = used + gross
+        return excess * float(isa_excess)
+    return gross * float(tax_rates.get(prof, tax_rates.get("KR_LISTED", 0.154)))
+
+
 def backtest(
     weights: dict[str, float],
     prices: dict,
@@ -849,6 +1095,9 @@ def backtest(
     sleeve_trend_lookback: int = 1,
     etf_flags: dict[str, dict] | None = None,
     ma_signal_freq: str = "monthly",
+    withdraw_mode: str = "none",
+    withdraw_amount: float = 0.0,
+    withdraw_rate: float = 0.0,
 ):
     codes = [c for c, w in weights.items() if w > 0]
     if not codes:
@@ -959,6 +1208,19 @@ def backtest(
     mdd = 0.0
     curve = []
     rets = []
+    holding_pnl: dict[str, float] = {}
+    hold_rows: list[dict[str, float]] = []
+    cf_mid: list[tuple[str, float]] = []
+    total_withdrawn = 0.0
+    depletion_date = None
+    wmode = withdraw_mode if withdraw_mode in ("amount", "rate") else "none"
+    w_amt = max(0.0, float(withdraw_amount or 0.0))
+    w_rate = max(0.0, min(1.0, float(withdraw_rate or 0.0)))
+    withdraw_on = (
+        wmode != "none"
+        and monthly_contribution <= 0
+        and (w_amt > 0 if wmode == "amount" else w_rate > 0)
+    )
     prev = None
     prev_value = None
     total_invested = float(initial_capital)
@@ -1136,6 +1398,17 @@ def backtest(
             value = sum(units[c] * prices[c][d] for c in active_codes)
             if prev_value is not None and prev_value > 0:
                 rets.append((d, value / prev_value - 1.0))
+                row: dict[str, float] = {}
+                for c, u in list(units.items()):
+                    if not u or c not in prices:
+                        continue
+                    p0 = prices[c].get(prev)
+                    p1 = prices[c].get(d)
+                    if not p0 or not p1 or not (p0 > 0):
+                        continue
+                    holding_pnl[c] = holding_pnl.get(c, 0.0) + u * (p1 - p0)
+                    row[c] = (u * p0 / prev_value) * (p1 / p0 - 1.0)
+                hold_rows.append(row)
 
             new_month = _is_new_month(prev, d)
             # Monthly MA signal (month start, prev month-end close) regardless of calendar
@@ -1147,6 +1420,25 @@ def backtest(
             else:
                 do_full = _is_rebal(prev, d, rebalance)
 
+            # Lump-sum withdrawal on the first session of a new month (no DCA).
+            # Pro-rata scale of units. No trade-cost on the cash-out.
+            # Default withdraw_on is false, so this block does not run.
+            if withdraw_on and new_month and value > 0 and depletion_date is None:
+                req = w_amt if wmode == "amount" else value * w_rate
+                wd = min(value, req)
+                if wd > 0:
+                    total_withdrawn += wd
+                    cf_mid.append((d, wd))
+                    if wd >= value - 1e-8:
+                        depletion_date = d
+                        value = 0.0
+                        units = {}
+                        active_codes = []
+                    else:
+                        k = (value - wd) / value
+                        units = {c: u * k for c, u in units.items()}
+                        value -= wd
+
             # 2) Monthly DCA cash inflow on first trading day of new month
             contrib = 0.0
             value_pre = value
@@ -1155,6 +1447,7 @@ def backtest(
                 value += contrib
                 total_invested += contrib
                 contributions += 1
+                cf_mid.append((d, -contrib))
 
             # 3a) Non-rebalance month: sleeve-only overlay update and/or DCA buy.
             # Core holdings keep their relative drift (no reset to target weights).
@@ -1296,7 +1589,11 @@ def backtest(
         (d, v / initial_capital, (v / inv - 1.0) if inv > 0 else 0.0)
         for d, v, inv in curve
     ]
-    return Stats(
+    _sortino, _calmar = _sortino_calmar(ret_vals, cagr, mdd)
+    _cfs = [(curve[0][0], -float(initial_capital))]
+    _cfs.extend(cf_mid)
+    _cfs.append((curve[-1][0], float(end_v)))
+    stats = Stats(
         start=curve[0][0],
         end=curve[-1][0],
         days=days,
@@ -1331,6 +1628,22 @@ def backtest(
         trade_cost=cost,
         total_cost_drag=total_cost_drag,
     )
+    # Not a dataclass field — asdict/golden hashes ignore it.
+    stats.lab = {
+        "sortino": _sortino,
+        "calmar": _calmar,
+        "irr": _xirr(_cfs),
+        "dailyRets": [[d, r] for d, r in rets],
+        "holdings": _holding_stats(holding_pnl, hold_rows, ret_vals),
+        "withdraw": None if not withdraw_on else {
+            "mode": wmode,
+            "amount": w_amt,
+            "rate": w_rate,
+            "total": total_withdrawn,
+            "depletionDate": depletion_date,
+        },
+    }
+    return stats
 
 
 
@@ -1463,6 +1776,13 @@ def compute_drawdown(curve, episode_threshold: float = -0.05):
     else:
         end_i = len(pairs) - 1 if max_dd < 0 else start_i
     underwater_days = max(0, end_i - start_i) if max_dd < 0 else 0
+    for ep in episodes:
+        a = date_index.get(ep["peakDate"], 0)
+        if ep.get("recoveryDate") in date_index:
+            b = date_index[ep["recoveryDate"]]
+        else:
+            b = len(pairs) - 1
+        ep["underwaterDays"] = max(0, b - a)
 
     return {
         "series": series,
@@ -1842,6 +2162,13 @@ def backtest_dividend(
     cost = _clamp_trade_cost(opts.get("cost"))
     tax_rates = dict(DIV_TAX_RATES)
     tax_rates.update(opts.get("taxRates") or {})
+    account = opts.get("account") or "general"
+    if account not in ("general", "isa", "pension"):
+        account = "general"
+    pension_rate = _pension_rate(opts.get("pensionRate", 0.044))
+    isa_limit = float(opts.get("isaLimit") or DIV_ISA_LIMIT)
+    isa_excess = float(opts.get("isaExcessRate") or DIV_ISA_EXCESS)
+    isa_used: dict[str, float] = {}
     band_on = bool(opts.get("bandOn"))
     band_pct = _clamp_band_pct(opts.get("bandPct")) if band_on else 0.0
     codes = [c for c in weights if weights[c] > 0]
@@ -1934,8 +2261,9 @@ def backtest_dividend(
                 native = u * e["amt"]
                 gross = native * fx
                 prof = data["div"][c].get("taxProfile", "KR_LISTED")
-                rate = float(tax_rates.get(prof, 0.0))
-                tax = gross * rate
+                tax = _div_event_tax(
+                    gross, prof, tax_rates, account, pension_rate, isa_used, e["ex"][:4], isa_limit, isa_excess
+                )
                 net = gross - tax
                 rec = {"ex": e["ex"], "d": d, "code": c, "amt": e["amt"], "units": u, "fx": fx,
                        "native": native, "gross": gross, "tax": tax, "net": net, "src": e.get("src")}
@@ -2118,6 +2446,10 @@ def backtest_dividend(
         "mdd": mdd, "mddHoldings": mdd_h,
         "costDrag": total_cost, "rebalCount": rebal_count, "dcaBuyCount": dca_count, "reinvestCount": reinvest_count,
         "taxRates": tax_rates,
+        "account": account,
+        "pensionRate": pension_rate if account == "pension" else None,
+        "isaLimit": isa_limit if account == "isa" else None,
+        "isaExcessRate": isa_excess if account == "isa" else None,
         "dividends": {
             "months": month_list, "years": years, "ttm": ttm, "byCode": by_code,
             "totalGross": sum(r["gross"] for r in events_log),
