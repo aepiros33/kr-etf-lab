@@ -1289,11 +1289,17 @@ async function applyRankRow(board, index) {
   rankUi.pick = { period: rankUi.period, board, index };
   document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
   state.activePreset = null;
-  state.period = rankUi.period;
+  // Table window is info.start~info.end. Sidebar 1y/3y/5y/10y uses periodBounds
+  // from the latest meta end, which is a different window than the printed row.
+  state.period = "custom";
   const periodEl = $("#period");
-  if (periodEl) periodEl.value = rankUi.period;
+  if (periodEl) periodEl.value = "custom";
+  const startEl = $("#startDate");
+  const endEl = $("#endDate");
+  if (startEl) startEl.value = info.start;
+  if (endEl) endEl.value = info.end;
   const custom = $("#customDates");
-  if (custom) custom.style.display = "none";
+  if (custom) custom.style.display = "flex";
   state.selected = {};
   await ensurePrices(row.tickers);
   row.tickers.forEach((code, i) => {
@@ -1648,7 +1654,11 @@ function periodBounds() {
   const years = { "1y": 1, "3y": 3, "5y": 5, "10y": 10, max: 25 }[state.period] || 5;
   const startDt = new Date(end + "T00:00:00");
   startDt.setFullYear(startDt.getFullYear() - years);
-  return [startDt.toISOString().slice(0, 10), end];
+  // Local calendar date. toISOString() is UTC, so midnight KST becomes the previous day.
+  const y = startDt.getFullYear();
+  const m = String(startDt.getMonth() + 1).padStart(2, "0");
+  const d = String(startDt.getDate()).padStart(2, "0");
+  return [`${y}-${m}-${d}`, end];
 }
 
 function computeDailyLogReturns(code, dates) {
