@@ -1058,6 +1058,7 @@ async function boot() {
   const asOfLine = state.pricesAsOf ? `시세 기준일 ${state.pricesAsOf}\n` : "";
   $("#stamp").textContent = `${asOfLine}시세 갱신 ${meta.generatedAt}\n${meta.source}\n메타 ${meta.etfs.length}종`;
   renderPresets();
+  await loadRankBoard();
   renderCatFilters();
   renderStructFilters();
   renderList();
@@ -1172,10 +1173,145 @@ function renderStructFilters() {
   });
 }
 
+
+/** Precomputed grid boards (data/rank_top10_cap50.json). Does not recompute returns. */
+const RANK_PERIODS = [
+  ["1y", "1년"],
+  ["3y", "3년"],
+  ["5y", "5년"],
+  ["10y", "10년"],
+];
+const rankUi = { data: null, period: "5y", pick: null };
+
+function rankPct(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "—";
+  return (n * 100).toFixed(2);
+}
+
+function rankCompose(row) {
+  const parts = row.tickers.map((code, i) => ({
+    code,
+    name: row.names[i],
+    w: row.weights[i],
+    i,
+  }));
+  parts.sort((a, b) => b.w - a.w || a.i - b.i);
+  return parts.map((part) => `${part.code} ${part.name} ${part.w}%`).join(" · ");
+}
+
+async function loadRankBoard() {
+  const win = $("#rankWindow");
+  try {
+    const res = await fetch("./data/rank_top10_cap50.json");
+    if (!res.ok) throw new Error(String(res.status));
+    const data = await res.json();
+    if (!data.periods || !data.periods["5y"]) throw new Error("empty");
+    rankUi.data = data;
+    rankUi.period = "5y";
+    renderRankPeriodChips();
+    renderRankBoards();
+  } catch (_) {
+    if (win) win.textContent = "순위 파일을 불러오지 못했습니다.";
+  }
+}
+
+function renderRankPeriodChips() {
+  const box = $("#rankPeriods");
+  if (!box) return;
+  box.innerHTML = "";
+  RANK_PERIODS.forEach(([key, label]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (rankUi.period === key ? " active" : "");
+    b.textContent = label;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", rankUi.period === key ? "true" : "false");
+    b.onclick = () => {
+      rankUi.period = key;
+      renderRankPeriodChips();
+      renderRankBoards();
+    };
+    box.appendChild(b);
+  });
+}
+
+function renderRankTable(container, rows, periodInfo, board) {
+  if (!container) return;
+  const start = periodInfo.start;
+  const end = periodInfo.end;
+  const days = periodInfo.days;
+  const head = `<table class="rank-table"><thead><tr><th>#</th><th>구성</th><th class="num">CAGR%</th><th class="num">누적%</th><th class="num">MDD%</th><th>시작</th><th>종료</th><th class="num">거래일</th></tr></thead><tbody>`;
+  const body = rows
+    .map((row, idx) => {
+      const on =
+        rankUi.pick &&
+        rankUi.pick.period === rankUi.period &&
+        rankUi.pick.board === board &&
+        rankUi.pick.index === idx;
+      return `<tr class="rank-row${on ? " active" : ""}" data-board="${board}" data-i="${idx}" tabindex="0" role="button"><td>${idx + 1}</td><td class="rank-compose">${escapeHtml(rankCompose(row))}</td><td class="num">${rankPct(row.cagr)}</td><td class="num">${rankPct(row.total)}</td><td class="num">${rankPct(row.mdd)}</td><td class="num">${escapeHtml(String(start))}</td><td class="num">${escapeHtml(String(end))}</td><td class="num">${days}</td></tr>`;
+    })
+    .join("");
+  container.innerHTML = head + body + "</tbody></table>";
+  container.querySelectorAll(".rank-row").forEach((tr) => {
+    const go = () => applyRankRow(tr.dataset.board, Number(tr.dataset.i));
+    tr.onclick = go;
+    tr.onkeydown = (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        go();
+      }
+    };
+  });
+}
+
+function renderRankBoards() {
+  const data = rankUi.data;
+  const info = data && data.periods && data.periods[rankUi.period];
+  const win = $("#rankWindow");
+  if (!info || !info.top_cagr || !info.top_mdd) {
+    if (win) win.textContent = "이 기간 격자 결과가 없습니다.";
+    return;
+  }
+  if (win) {
+    win.textContent = `창 ${info.start} ~ ${info.end} · 거래일 ${info.days} · 시총 상위 풀 ${info.pool_n}종`;
+  }
+  renderRankTable($("#rankCagr"), info.top_cagr, info, "cagr");
+  renderRankTable($("#rankMdd"), info.top_mdd, info, "mdd");
+}
+
+async function applyRankRow(board, index) {
+  const info = rankUi.data && rankUi.data.periods && rankUi.data.periods[rankUi.period];
+  if (!info) return;
+  const rows = board === "mdd" ? info.top_mdd : info.top_cagr;
+  const row = rows && rows[index];
+  if (!row || !state.meta) return;
+  rankUi.pick = { period: rankUi.period, board, index };
+  document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
+  state.activePreset = null;
+  state.period = rankUi.period;
+  const periodEl = $("#period");
+  if (periodEl) periodEl.value = rankUi.period;
+  const custom = $("#customDates");
+  if (custom) custom.style.display = "none";
+  state.selected = {};
+  await ensurePrices(row.tickers);
+  row.tickers.forEach((code, i) => {
+    if (state.meta.etfs.some((e) => e.code === code)) state.selected[code] = row.weights[i];
+  });
+  renderList();
+  renderRankBoards();
+  await run();
+  const result = $("#result");
+  if (result && result.scrollIntoView) result.scrollIntoView({ block: "start" });
+}
+
 async function applyPreset(key) {
   document.querySelectorAll("#presets .chip").forEach((el) =>
     el.classList.toggle("active", el.dataset.key === key)
   );
+  rankUi.pick = null;
+  document.querySelectorAll("#rankPanel .rank-row.active").forEach((el) => el.classList.remove("active"));
   state.activePreset = key;
   state.selected = {};
   const codes = Object.keys(PRESETS[key].w);
@@ -6726,6 +6862,8 @@ async function divShowMode(mode) {
   if (!pl || !dl) return;
   pl.hidden = isDiv;
   dl.hidden = !isDiv;
+  const rankPanel = $("#rankPanel");
+  if (rankPanel) rankPanel.hidden = isDiv;
   const bp = $("#modePrice"),
     bd = $("#modeDiv");
   bp?.classList.toggle("active", !isDiv);

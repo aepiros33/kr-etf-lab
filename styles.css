@@ -644,3 +644,41 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
 }
 .div-table tr.div-unknown td { color: var(--muted, #8b9aab); }
 #divCustomRow[hidden] { display: none; }
+
+/* 격자 상위 조합 (rank1). Tables scroll inside the board, not the page. */
+.rank-panel { margin: 0 0 16px; min-width: 0; max-width: 100%; }
+.rank-boards {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+}
+@media (min-width: 1100px) {
+  .rank-boards { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
+.rank-board { min-width: 0; max-width: 100%; }
+.rank-scroll {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+.rank-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.rank-table th, .rank-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.rank-table th.num, .rank-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rank-compose { min-width: 220px; line-height: 1.45; }
+.rank-row { cursor: pointer; }
+.rank-row:hover, .rank-row.active { background: rgba(125,211,192,.08); }
+.rank-row:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
