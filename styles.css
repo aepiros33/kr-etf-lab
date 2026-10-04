@@ -645,17 +645,9 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
 .div-table tr.div-unknown td { color: var(--muted, #8b9aab); }
 #divCustomRow[hidden] { display: none; }
 
-/* 격자 상위 조합 (rank1). Tables scroll inside the board, not the page. */
+/* 3종 CAGR 격자 (plan1). Table scrolls inside the panel, not the page. */
 .rank-panel { margin: 0 0 16px; min-width: 0; max-width: 100%; }
-.rank-boards {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
-}
-@media (min-width: 1100px) {
-  .rank-boards { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-}
-.rank-board { min-width: 0; max-width: 100%; }
+#rankCaps { margin-top: 6px; }
 .rank-scroll {
   overflow-x: auto;
   max-width: 100%;
@@ -682,3 +674,4 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
 .rank-row { cursor: pointer; }
 .rank-row:hover, .rank-row.active { background: rgba(125,211,192,.08); }
 .rank-row:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+.rank-cmp { padding: 2px 8px; font-size: 11px; white-space: nowrap; }

@@ -1174,14 +1174,20 @@ function renderStructFilters() {
 }
 
 
-/** Precomputed grid boards (data/rank_top10_cap50.json). Does not recompute returns. */
+/** Precomputed 3-name CAGR grid (data/rank_plan1.json). Does not recompute returns. */
 const RANK_PERIODS = [
   ["1y", "1년"],
   ["3y", "3년"],
   ["5y", "5년"],
   ["10y", "10년"],
 ];
-const rankUi = { data: null, period: "5y", pick: null };
+const RANK_CAPS = [
+  ["none", "제한 없음"],
+  ["m25", "-25%"],
+  ["m30", "-30%"],
+  ["m40", "-40%"],
+];
+const rankUi = { data: null, period: "5y", cap: "none", pick: null, slotBusy: false };
 
 function rankPct(x) {
   const n = Number(x);
@@ -1200,19 +1206,25 @@ function rankCompose(row) {
   return parts.map((part) => `${part.code} ${part.name} ${part.w}%`).join(" · ");
 }
 
+function rankCapBlock(info) {
+  return info && info.caps && info.caps[rankUi.cap];
+}
+
 async function loadRankBoard() {
   const win = $("#rankWindow");
   try {
-    const res = await fetch("./data/rank_top10_cap50.json");
+    const res = await fetch("./data/rank_plan1.json");
     if (!res.ok) throw new Error(String(res.status));
     const data = await res.json();
     if (!data.periods || !data.periods["5y"]) throw new Error("empty");
     rankUi.data = data;
     rankUi.period = "5y";
+    rankUi.cap = "none";
     renderRankPeriodChips();
+    renderRankCapChips();
     renderRankBoards();
   } catch (_) {
-    if (win) win.textContent = "순위 파일을 불러오지 못했습니다.";
+    if (win) win.textContent = "격자 파일을 불러오지 못했습니다.";
   }
 }
 
@@ -1236,25 +1248,48 @@ function renderRankPeriodChips() {
   });
 }
 
-function renderRankTable(container, rows, periodInfo, board) {
+function renderRankCapChips() {
+  const box = $("#rankCaps");
+  if (!box) return;
+  box.innerHTML = "";
+  const labels = Object.fromEntries(RANK_CAPS);
+  const caps = (rankUi.data && rankUi.data.caps) || RANK_CAPS.map(([id, label]) => ({ id, label }));
+  caps.forEach((cap) => {
+    const key = cap.id;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (rankUi.cap === key ? " active" : "");
+    b.textContent = labels[key] || cap.label || key;
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", rankUi.cap === key ? "true" : "false");
+    b.onclick = () => {
+      rankUi.cap = key;
+      renderRankCapChips();
+      renderRankBoards();
+    };
+    box.appendChild(b);
+  });
+}
+
+function renderRankTable(container, rows, periodInfo) {
   if (!container) return;
   const start = periodInfo.start;
   const end = periodInfo.end;
   const days = periodInfo.days;
-  const head = `<table class="rank-table"><thead><tr><th>#</th><th>구성</th><th class="num">CAGR%</th><th class="num">누적%</th><th class="num">MDD%</th><th>시작</th><th>종료</th><th class="num">거래일</th></tr></thead><tbody>`;
+  const head = `<table class="rank-table"><thead><tr><th>#</th><th>구성</th><th class="num">CAGR%</th><th class="num">누적%</th><th class="num">MDD%</th><th>시작</th><th>종료</th><th class="num">거래일</th><th></th></tr></thead><tbody>`;
   const body = rows
     .map((row, idx) => {
       const on =
         rankUi.pick &&
         rankUi.pick.period === rankUi.period &&
-        rankUi.pick.board === board &&
+        rankUi.pick.cap === rankUi.cap &&
         rankUi.pick.index === idx;
-      return `<tr class="rank-row${on ? " active" : ""}" data-board="${board}" data-i="${idx}" tabindex="0" role="button"><td>${idx + 1}</td><td class="rank-compose">${escapeHtml(rankCompose(row))}</td><td class="num">${rankPct(row.cagr)}</td><td class="num">${rankPct(row.total)}</td><td class="num">${rankPct(row.mdd)}</td><td class="num">${escapeHtml(String(start))}</td><td class="num">${escapeHtml(String(end))}</td><td class="num">${days}</td></tr>`;
+      return `<tr class="rank-row${on ? " active" : ""}" data-i="${idx}" tabindex="0" role="button"><td>${idx + 1}</td><td class="rank-compose">${escapeHtml(rankCompose(row))}</td><td class="num">${rankPct(row.cagr)}</td><td class="num">${rankPct(row.total)}</td><td class="num">${rankPct(row.mdd)}</td><td class="num">${escapeHtml(String(start))}</td><td class="num">${escapeHtml(String(end))}</td><td class="num">${days}</td><td><button type="button" class="secondary rank-cmp" data-cmp="${idx}">비교</button></td></tr>`;
     })
     .join("");
   container.innerHTML = head + body + "</tbody></table>";
   container.querySelectorAll(".rank-row").forEach((tr) => {
-    const go = () => applyRankRow(tr.dataset.board, Number(tr.dataset.i));
+    const go = () => applyRankRow(Number(tr.dataset.i));
     tr.onclick = go;
     tr.onkeydown = (e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -1263,30 +1298,59 @@ function renderRankTable(container, rows, periodInfo, board) {
       }
     };
   });
+  container.querySelectorAll(".rank-cmp").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      putRankMixInCompare(Number(btn.dataset.cmp));
+    };
+  });
 }
 
 function renderRankBoards() {
   const data = rankUi.data;
   const info = data && data.periods && data.periods[rankUi.period];
   const win = $("#rankWindow");
-  if (!info || !info.top_cagr || !info.top_mdd) {
-    if (win) win.textContent = "이 기간 격자 결과가 없습니다.";
+  const countEl = $("#rankCount");
+  const host = $("#rankCagr");
+  if (!info || info.skipped) {
+    if (win) win.textContent = info && info.reason ? info.reason : "이 기간 격자 결과가 없습니다.";
+    if (countEl) countEl.textContent = "";
+    if (host) host.innerHTML = "";
+    return;
+  }
+  const block = rankCapBlock(info);
+  if (!block || !Array.isArray(block.rows)) {
+    if (win) win.textContent = "이 낙폭 한도 결과가 없습니다.";
+    if (countEl) countEl.textContent = "";
+    if (host) host.innerHTML = "";
     return;
   }
   if (win) {
     win.textContent = `창 ${info.start} ~ ${info.end} · 거래일 ${info.days} · 시총 상위 풀 ${info.pool_n}종`;
   }
-  renderRankTable($("#rankCagr"), info.top_cagr, info, "cagr");
-  renderRankTable($("#rankMdd"), info.top_mdd, info, "mdd");
+  const n = Number(block.n);
+  const shown = block.rows.length;
+  if (countEl) {
+    countEl.textContent = Number.isFinite(n)
+      ? `이 한도에 남은 3종 조합 ${n}개` + (shown < n ? ` 중 ${shown}개` : "")
+      : "";
+  }
+  if (!shown) {
+    if (host) host.innerHTML = "";
+    if (countEl) countEl.textContent = "이 한도에 남은 3종 조합 0개";
+    return;
+  }
+  renderRankTable(host, block.rows, info);
 }
 
-async function applyRankRow(board, index) {
+async function applyRankRow(index) {
   const info = rankUi.data && rankUi.data.periods && rankUi.data.periods[rankUi.period];
-  if (!info) return;
-  const rows = board === "mdd" ? info.top_mdd : info.top_cagr;
-  const row = rows && rows[index];
+  const block = rankCapBlock(info);
+  if (!info || info.skipped || !block) return;
+  const row = block.rows && block.rows[index];
   if (!row || !state.meta) return;
-  rankUi.pick = { period: rankUi.period, board, index };
+  rankUi.pick = { period: rankUi.period, cap: rankUi.cap, index };
   document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
   state.activePreset = null;
   // Table window is info.start~info.end. Sidebar 1y/3y/5y/10y uses periodBounds
@@ -1310,6 +1374,43 @@ async function applyRankRow(board, index) {
   await run();
   const result = $("#result");
   if (result && result.scrollIntoView) result.scrollIntoView({ block: "start" });
+}
+
+async function putRankMixInCompare(index) {
+  const info = rankUi.data && rankUi.data.periods && rankUi.data.periods[rankUi.period];
+  const block = rankCapBlock(info);
+  const row = block && block.rows && block.rows[index];
+  if (!info || info.skipped || !row || rankUi.slotBusy) return;
+  const picks = row.tickers.map((code, i) => [code, row.weights[i]]);
+  const slotId = state.compareSlots.A ? "B" : "A";
+  rankUi.slotBusy = true;
+  setCompareStatus(`슬롯 ${slotId}에 넣는 중…`);
+  try {
+    const cfg = currentStrategyCfg();
+    const result = await executePortBacktest(picks, info.start, info.end, cfg);
+    if (!result || result.error) {
+      setCompareStatus(`슬롯 ${slotId}: ${result && result.error ? result.error : "실행 실패"}`);
+      return;
+    }
+    state.compareSlots[slotId] = {
+      label: slotLabelFromPicks(picks, null),
+      presetKey: null,
+      picks,
+      cfg,
+      requestedStart: info.start,
+      requestedEnd: info.end,
+      result,
+    };
+    updateComparePanel();
+    setCompareStatus(`슬롯 ${slotId}에 넣음: ${rankCompose(row)}`);
+    if (state.compareSlots.A && state.compareSlots.B) {
+      await showCompareView();
+    }
+  } catch (err) {
+    setCompareStatus(String(err && err.message ? err.message : err));
+  } finally {
+    rankUi.slotBusy = false;
+  }
 }
 
 async function applyPreset(key) {
@@ -4202,6 +4303,16 @@ function clearCompareSlots() {
   }
 }
 
+function sharedEtfCodeCount(picksA, picksB) {
+  const a = new Set((picksA || []).map(([c]) => String(c)));
+  const b = new Set((picksB || []).map(([c]) => String(c)));
+  let n = 0;
+  a.forEach((c) => {
+    if (b.has(c)) n += 1;
+  });
+  return n;
+}
+
 function holdingsSummary(picks) {
   if (!picks || !picks.length) return "—";
   return picks
@@ -4479,8 +4590,10 @@ function renderCompareView(aligned) {
     <div class="warn">비교 창 ${aligned.commonStart} ~ ${aligned.commonEnd} (두 포트 결과의 교집합으로 재실행) · 과거 시뮬 · 투자 자문 아님</div>
   </div>`;
 
+  const sharedCodes = sharedEtfCodeCount(a.picks, b.picks);
   const holdCard = `<div class="card pad compare-hold-card">
     <div class="section-title">보유 비중</div>
+    <p class="muted-note">두 조합이 같이 가진 ETF 코드 ${sharedCodes}개</p>
     <div class="compare-hold-grid">
       <div><div class="slot-pill slot-a">A</div><p class="muted-note">${escapeHtml(holdingsSummary(a.picks))}</p></div>
       <div><div class="slot-pill slot-b">B</div><p class="muted-note">${escapeHtml(holdingsSummary(b.picks))}</p></div>

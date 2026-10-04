@@ -303,8 +303,8 @@ def check_wording(fail):
     for lab in REQUIRED_LABELS:
         if lab not in div_js and lab not in div_html:
             fail(f"required dividend label missing: 「{lab}」")
-    if "?v=rank2" not in idx or "?v=rank1" in idx or "?v=feat12" in idx or "?v=univ1" in idx or "?v=div1" in idx or "?v=div3" in idx:
-        fail("cache-bust ?v=rank2 missing (or stale ?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
+    if "?v=plan1" not in idx or "?v=rank2" in idx or "?v=rank1" in idx or "?v=feat12" in idx or "?v=univ1" in idx or "?v=div1" in idx or "?v=div3" in idx:
+        fail("cache-bust ?v=plan1 missing (or stale ?v=rank2/?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
     for need in ('id="btnDivCsv"', 'id="btnDivShare"', "divBuildCsv", "divEncodeHash", "divDecodeHash"):
         if need not in div_js:
             fail(f"dividend share/CSV UI missing: {need}")
