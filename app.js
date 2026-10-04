@@ -1065,7 +1065,7 @@ async function boot() {
   renderBenchOptions();
   renderHedgeOptions();
   try {
-    const cpiRes = await fetch("./data/cpi_kr.json");
+    const cpiRes = await fetch("./data/cpi_kr.json?v=plan2");
     if (cpiRes.ok) state.cpi = await cpiRes.json();
   } catch (_) { /* gated */ }
   try {
@@ -4927,6 +4927,14 @@ function stressDrawdowns(curve, windows = STRESS_WINDOWS) {
   });
 }
 
+function annFromTotal(total, years) {
+  if (total == null || !(years > 0)) return null;
+  const base = 1 + total;
+  if (!(base > 0)) return null;
+  const v = Math.pow(base, 1 / years) - 1;
+  return Number.isFinite(v) ? v : null;
+}
+
 function realReturns(curve, yearly, totalReturn, cpi) {
   if (!cpi || !cpi.available || !cpi.series || !cpi.series.length) {
     return {
@@ -4942,15 +4950,23 @@ function realReturns(curve, yearly, totalReturn, cpi) {
   if (pairs.length < 2) return { available: false, reason: "곡선이 짧습니다" };
   const c0 = idx[pairs[0][0].slice(0, 7)];
   const c1 = idx[pairs[pairs.length - 1][0].slice(0, 7)];
+  const years = (pairs.length - 1) / 252;
+  const realTotal = c0 && c1 ? (1 + totalReturn) / (c1 / c0) - 1 : null;
   const out = {
     available: true,
     source: cpi.source,
+    sourceUrl: cpi.sourceUrl || "",
+    tableId: cpi.tableId || "",
+    unit: cpi.unit || cpi.base || "",
     base: cpi.base,
+    lastMonth: cpi.lastMonth || "",
     cpiStart: c0 || null,
     cpiEnd: c1 || null,
     start: pairs[0][0],
     end: pairs[pairs.length - 1][0],
-    realTotal: c0 && c1 ? (1 + totalReturn) / (c1 / c0) - 1 : null,
+    nominalCagr: annFromTotal(totalReturn, years),
+    realCagr: annFromTotal(realTotal, years),
+    realTotal,
     yearly: {},
     note: c0 && c1 ? null : "시작 또는 종료 월의 CPI가 없어 누적 실질은 표시하지 않습니다",
   };
@@ -5069,7 +5085,7 @@ function renderFeatPanels(r, bench, dd) {
   const real = realReturns(r.curve, r.yearly, r.totalRet, state.cpi);
   const realCard = !real.available
     ? `<div class="card pad" id="realPanel"><div class="section-title">실질(물가) 수익률 · 꺼짐</div><p class="muted-note">${real.reason || "공식 CPI 없음"} 물가 숫자는 만들지 않았습니다.</p></div>`
-    : `<div class="card pad" id="realPanel"><div class="section-title">실질(물가) 수익률</div><p>누적 실질 ${real.realTotal == null ? "—" : pct(real.realTotal, 2)}</p><table><thead><tr><th>연도</th><th>명목</th><th>실질</th></tr></thead><tbody>${Object.keys(real.yearly).sort().map((y) => { const row = real.yearly[y]; return `<tr><td>${y}</td><td class="${cls(row.nominal)}">${pct(row.nominal, 2)}</td><td>${row.real == null ? "—" : pct(row.real, 2)}</td></tr>`; }).join("")}</tbody></table><p class="muted-note">${real.source || ""} ${real.note || ""} CPI가 없는 달은 비웁니다. 과거 시뮬.</p></div>`;
+    : `<div class="card pad" id="realPanel"><div class="section-title">실질(물가) 수익률</div><div class="kpis">${kpi("명목 CAGR", real.nominalCagr == null ? "—" : pct(real.nominalCagr), real.nominalCagr == null ? "" : cls(real.nominalCagr))}${kpi("실질 CAGR", real.realCagr == null ? "—" : pct(real.realCagr), real.realCagr == null ? "" : cls(real.realCagr))}</div><p>누적 실질 ${real.realTotal == null ? "—" : pct(real.realTotal, 2)}</p><table><thead><tr><th>연도</th><th>명목</th><th>실질</th></tr></thead><tbody>${Object.keys(real.yearly).sort().map((y) => { const row = real.yearly[y]; return `<tr><td>${y}</td><td class="${cls(row.nominal)}">${pct(row.nominal, 2)}</td><td>${row.real == null ? "—" : pct(row.real, 2)}</td></tr>`; }).join("")}</tbody></table><p class="muted-note">명목 CAGR은 이 백테스트 창의 연환산(납입 합, 252거래일)입니다. 실질 CAGR은 같은 누적을 시작월·종료월 소비자물가지수로 나눈 뒤 같은 거래일 수로 연환산한 과거 값입니다. ${real.source || ""} ${real.tableId || ""} ${real.unit || real.base || ""} ${real.lastMonth ? "마지막 수록월 " + real.lastMonth : ""}. ${real.note || ""} CPI가 없는 달은 비웁니다. 과거 시뮬.</p></div>`;
   const boot = `<div class="card pad" id="bootPanel"><div class="section-title">과거 일별 수익률 재추출</div><button type="button" class="secondary" id="btnBootstrap">재추출 보기</button><div id="bootOut" class="muted-note">관측된 일별 수익률을 같은 길이로 다시 뽑습니다. 과거를 재추출하면 누적 수익률이 어떻게 퍼지는지만 보여 줍니다.</div></div>`;
   const stress = stressDrawdowns(r.curve);
   const srows = stress
