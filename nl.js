@@ -91,7 +91,7 @@
   const NL_REFUSE_MSG = "과거 시뮬만 합니다. 종목과 비중을 적어 주세요";
   const NL_REFUSE_RANK_MSG = "과거 격자 순위만 보여 줍니다. 기간·제외 종목을 적어 주세요";
 
-  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "반도체 50 미국S&P 50 5년", "배당 위주 3종목 최장", "반도체 빼고 10년 수익률 높은 조합"];
+  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "반도체 50 미국S&P 50 5년", "배당 위주 3종목 최장", "반도체 빼고 5년 수익률 높은 조합"];
 
   // ---- 격자 순위 검색 (nl3): 미리 계산된 data/rank_deep_nl3.json을 거르기만 한다. 새 격자 계산 없음 ----
   // 순위 의도. 화면에는 이 단어들을 다시 쓰지 않는다(입력 인식용).
@@ -975,7 +975,7 @@ async function nlSubmit(text) {
   if (p.mode === "rank") { nlRankClear(); await nlRankShow(p); return p; }
   nlRankClear();
   if (p.refuse) {
-    nlRender(`<div class="nl-hint nl-refuse"><div>${nlEsc(NL.NL_REFUSE_MSG)}.</div><div>${nlEsc(NL.NL_REFUSE_RANK_MSG)} (예: 반도체 빼고 10년 수익률 높은 조합)</div></div>`);
+    nlRender(`<div class="nl-hint nl-refuse"><div>${nlEsc(NL.NL_REFUSE_MSG)}.</div><div>${nlEsc(NL.NL_REFUSE_RANK_MSG)} (예: 반도체 빼고 5년 수익률 높은 조합)</div></div>`);
     return p;
   }
   if (!p.ok) {
@@ -1003,7 +1003,7 @@ async function nlSubmit(text) {
 // ---------- 격자 순위 검색 화면 ----------
 async function nlRankData() {
   if (nlUi.deep) return nlUi.deep;
-  const res = await fetch("./data/rank_deep_nl3.json?v=nl3");
+  const res = await fetch("./data/rank_deep_nl3.json?v=nl4");
   if (!res.ok) throw new Error(String(res.status));
   nlUi.deep = await res.json();
   return nlUi.deep;
