@@ -303,12 +303,12 @@ def check_wording(fail):
     for lab in REQUIRED_LABELS:
         if lab not in div_js and lab not in div_html:
             fail(f"required dividend label missing: 「{lab}」")
-    stale = ("?v=nl3", "?v=nl2", "?v=nl1", "?v=plan2", "?v=plan1", "?v=rank2", "?v=rank1", "?v=feat12", "?v=univ1", "?v=div1", "?v=div3")
+    stale = ("?v=nl4", "?v=nl3", "?v=nl2", "?v=nl1", "?v=plan2", "?v=plan1", "?v=rank2", "?v=rank1", "?v=feat12", "?v=univ1", "?v=div1", "?v=div3")
     nljs = (ROOT / "nl.js").read_text(encoding="utf-8") if (ROOT / "nl.js").exists() else ""
-    if ("app.js?v=nl4" not in idx or "nl.js?v=nl4" not in idx or "styles.css?v=nl4" not in idx
-            or "cpi_kr.json?v=nl4" not in app or "rank_deep_nl3.json?v=nl4" not in nljs
+    if ("app.js?v=nl5" not in idx or "nl.js?v=nl5" not in idx or "styles.css?v=nl5" not in idx
+            or "cpi_kr.json?v=nl5" not in app or "rank_deep_nl3.json?v=nl5" not in nljs
             or any(old in idx or old in app or old in nljs for old in stale)):
-        fail("cache-bust ?v=nl4 missing on app.js/nl.js/styles.css/cpi fetch/rank_deep fetch (or stale ?v=nl3/?v=nl2/?v=nl1/?v=plan2/?v=plan1/?v=rank2/?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
+        fail("cache-bust ?v=nl5 missing on app.js/nl.js/styles.css/cpi fetch/rank_deep fetch (or stale ?v=nl4/?v=nl3/?v=nl2/?v=nl1/?v=plan2/?v=plan1/?v=rank2/?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
     for need in ('id="btnDivCsv"', 'id="btnDivShare"', "divBuildCsv", "divEncodeHash", "divDecodeHash"):
         if need not in div_js:
             fail(f"dividend share/CSV UI missing: {need}")

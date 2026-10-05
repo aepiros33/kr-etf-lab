@@ -81,7 +81,7 @@
     ("위주 중심 비중 포트 포트폴리오 백테스트 백테 계산 계산해 계산해줘 해줘 해 줘 보여줘 돌려줘 돌려 시뮬 시뮬레이션 " +
       "으로 로 하고 그리고 및 랑 이랑 와 과 에 각각 씩 정도 기간 동안 최근 수익률 결과 투자 하면 했으면 했다면 " +
       "넣고 넣으면 섞어서 섞어 동일비중 동일 균등 똑같이 같은비중 리밸런싱 리밸 적립 기준 수익 보기 봐줘 알려줘 " +
-      "etf 종목 개 종 년 퍼센트 프로 만원 원 해서 나눠서 나눠 반씩 비례 비례맞춤")
+      "etf 종목 개 종 년 퍼센트 프로 만원 원 해서 나눠서 나눠 반씩 비례 비례맞춤 납입 적금 적금처럼 적금식 적립식 월납입 매월 매달")
       .split(/\s+/)
   );
   const NL_PARTICLES = ["이랑", "하고", "으로", "에서", "까지", "부터", "랑", "과", "와", "을", "를", "은", "는", "이", "가", "에", "로", "도", "만", "씩", "의"];
@@ -301,13 +301,23 @@
       return v;
     };
     {
-      const re = /(매월|매달|달마다|월)\s*(\d+(?:\.\d+)?)\s*(억\s*원|억|천만\s*원|천만|백만\s*원|백만|만\s*원|만|원)\s*(씩)?\s*(적립|투자|넣|납입|모으|매수|추가)?\S*/;
-      const m = re.exec(t);
+      // 월 납입 동의어: 매월/매달/월/월납입/월적립/적금/적립식/납입 + 금액(+씩)(+적립·납입…) 또는 금액(+씩) + 매월/월납입/적립/납입/적금
+      const UNIT = "(억\\s*원|억|천만\\s*원|천만|백만\\s*원|백만|만\\s*원|만|원)";
+      const TAIL = "(씩)?[^\\s\\d]*(?:\\s*(적립|투자|넣|납입|모으|매수|추가|적금)\\S*)?";
+      const reA = new RegExp("(월\\s*납입액?|월\\s*적립액?|매월\\s*납입|매달\\s*납입|매월\\s*적립|매달\\s*적립|적립식|적금|납입액?|적립액?|매월|매달|달마다|월)\\s*(으로|은|는|:)?\\s*(매월|매달|월)?\\s*(\\d+(?:\\.\\d+)?)\\s*" + UNIT + TAIL, "g");
+      const reB = new RegExp("(\\d+(?:\\.\\d+)?)\\s*" + UNIT + "\\s*(씩)?\\s*(매월|매달|달마다|월)?\\s*(납입|적립|적금|넣|모으|투자)\\S*|(\\d+(?:\\.\\d+)?)\\s*" + UNIT + "\\s*씩\\s*(매월|매달|달마다)\\S*", "g");
+      let m = null, monthly = null, mm;
+      reA.lastIndex = 0;
+      while ((mm = reA.exec(t))) {
+        if (/^월/.test(mm[0]) && /개\s*$/.test(t.slice(0, mm.index))) { reA.lastIndex = mm.index + 1; continue; } // 「18개월」의 월은 아님
+        m = mm; monthly = money(mm[4], mm[5]); break;
+      }
+      if (!m) { reB.lastIndex = 0; if ((mm = reB.exec(t))) { m = mm; monthly = mm[1] ? money(mm[1], mm[2]) : money(mm[6], mm[7]); } }
       if (m) {
-        out.dca = { monthly: money(m[2], m[3]) };
+        out.dca = { monthly };
         t = blank(t, m.index, m.index + m[0].length);
       }
-      const re2 = /(?:(초기|원금|시작|일시금|목돈|처음)\s*(자금|금액)?\s*(\d+(?:\.\d+)?)\s*(억\s*원|억|천만\s*원|천만|백만\s*원|백만|만\s*원|만|원)|(\d+(?:\.\d+)?)\s*(억\s*원|억|천만\s*원|천만|백만\s*원|백만|만\s*원|만|원)\s*(으로\s*시작|으로|시작|일시금|원금|목돈|로\s*시작))\S*/;
+      const re2 = /(?:(초기|원금|시작|일시금|목돈|처음|처음에)\s*(자금|금액|투자금|에|엔)?\s*(\d+(?:\.\d+)?)\s*(억\s*원|억|천만\s*원|천만|백만\s*원|백만|만\s*원|만|원)|(\d+(?:\.\d+)?)\s*(억\s*원|억|천만\s*원|천만|백만\s*원|백만|만\s*원|만|원)\s*(으로\s*시작|으로|시작|일시금|원금|목돈|로\s*시작))\S*/;
       const m2 = re2.exec(t);
       if (m2) {
         out.initialCapital = m2[3] ? money(m2[3], m2[4]) : money(m2[5], m2[6]);
@@ -789,7 +799,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this);
 
 // ===================== 브라우저 연결 (app.js의 state / run() 재사용) =====================
-const nlUi = { dict: null, owned: { rebal: false, dca: false }, last: null, busy: false, booted: false, deep: null, rankLast: null };
+const nlUi = { icShown: false, dict: null, owned: { rebal: false, dca: false }, last: null, busy: false, booted: false, deep: null, rankLast: null };
 
 function nlEsc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -810,14 +820,22 @@ function nlLatestEnd() {
 const NL_REBAL_LABEL = { Q: "분기 리밸런싱", Y: "연 1회 리밸런싱", M: "매월 리밸런싱", N: "리밸런싱 없음",
   MOM: "월간 모멘텀", MOM12_1: "12-1 스킵 모멘텀", XSMOM: "XS 잔차 모멘텀", DMOM: "듀얼 모멘텀" };
 
-/** 숨은 기본값 한 줄 + 기본값과 다른 고급 설정 목록 */
+/** 금액을 만원/억원 단위로 (예: 500000 → 50만원) */
+function nlMan(n) {
+  n = Math.round(Number(n) || 0);
+  if (n >= 1e8 && n % 1e8 === 0) return `${(n / 1e8).toLocaleString("ko-KR")}억원`;
+  if (n >= 1e4 && n % 1e4 === 0) return `${(n / 1e4).toLocaleString("ko-KR")}만원`;
+  return won(n);
+}
+
+/** 숨은 기본값 한 줄 + 기본값과 다른 전문가 모드 설정 목록 */
 function nlSettingsSummary() {
   const tc = clampTradeCost(state.tradeCost);
   const parts = [NL_REBAL_LABEL[state.rebalance] || state.rebalance, `비용 ${(tc * 100).toFixed(2)}%`];
   const withdrawOn = !state.dcaOn && state.withdrawMode && state.withdrawMode !== "none";
-  if (state.dcaOn) parts.push(`시작 ${won(state.initialCapital)} + 매월 ${won(state.monthlyAmount)} 적립`);
+  if (state.dcaOn) parts.push(`초기 ${nlMan(state.initialCapital)} + 매월 ${nlMan(state.monthlyAmount)} 납입`);
   else if (withdrawOn) parts.push(state.withdrawMode === "amount" ? `매월 ${won(state.withdrawAmount)} 인출` : `매월 잔액 ${(state.withdrawRate * 100).toFixed(1)}% 인출`);
-  else parts.push("일시불입");
+  else parts.push(nlUi.icShown ? `초기 ${nlMan(state.initialCapital)} 일시불입` : "일시불입");
   const ov = [];
   if (state.maOverlay) ov.push(`이동평균 MA${state.maWindow}`);
   if (state.regimeHedge) ov.push("국면 헤지");
@@ -830,7 +848,7 @@ function nlSettingsSummary() {
   const changed = [...ov];
   if (Math.round(tc * 10000) !== Math.round(TRADE_COST_DEFAULT * 10000)) changed.push(`비용 ${(tc * 100).toFixed(2)}%`);
   if (state.rebalance !== "Q" && !nlUi.owned.rebal) changed.push(NL_REBAL_LABEL[state.rebalance] || state.rebalance);
-  if (state.dcaOn && !nlUi.owned.dca) changed.push("월 적립");
+  if (state.dcaOn && !nlUi.owned.dca) changed.push("월 납입");
   if (withdrawOn) changed.push("인출");
   if (state.accountType === "pension") changed.push("연금 계좌 세금 모형");
   return { line: parts.join(" · "), changed };
@@ -881,7 +899,7 @@ function nlRenderInterp(p, opts = {}) {
   const isMax = !p.period || p.period.kind === "max";
   const clip = nlClipNote(periodLabel, isMax, codes);
   const badge = sum.changed.length
-    ? `<span class="nl-badge" title="${nlEsc(sum.changed.join(" · "))}">고급 설정 변경됨: ${nlEsc(sum.changed.join(" · "))}</span>`
+    ? `<span class="nl-badge" title="${nlEsc(sum.changed.join(" · "))}">전문가 모드 설정 변경됨: ${nlEsc(sum.changed.join(" · "))}</span>`
     : "";
   const head = opts.prefix || "이렇게 이해했어요";
   let html = `<div class="nl-interp"><span class="nl-head">${nlEsc(head)}:</span> ${nlItemsLine(p.items)} · ${nlEsc(periodLabel)}</div>`;
@@ -936,7 +954,10 @@ async function nlApply(p) {
     state.withdrawMode = "none";
     nlUi.owned.dca = true;
   } else if (nlUi.owned.dca) { state.dcaOn = false; nlUi.owned.dca = false; }
-  if (p.initialCapital) state.initialCapital = Math.max(1, p.initialCapital);
+  // 초기 금액도 문장이 정한 값만 쓰고, 다음 문장에서 빠지면 기본(1,000만원)으로 되돌린다
+  if (p.initialCapital) { state.initialCapital = Math.max(1, p.initialCapital); nlUi.owned.ic = true; }
+  else if (nlUi.owned.ic) { state.initialCapital = 10000000; nlUi.owned.ic = false; }
+  nlUi.icShown = !!p.initialCapital;
   syncControlsFromState();
   const momOn = ["MOM", "DMOM", "MOM12_1", "XSMOM"].includes(state.rebalance);
   const momRow = document.getElementById("momControls");
@@ -1003,7 +1024,7 @@ async function nlSubmit(text) {
 // ---------- 격자 순위 검색 화면 ----------
 async function nlRankData() {
   if (nlUi.deep) return nlUi.deep;
-  const res = await fetch("./data/rank_deep_nl3.json?v=nl4");
+  const res = await fetch("./data/rank_deep_nl3.json?v=nl5");
   if (!res.ok) throw new Error(String(res.status));
   nlUi.deep = await res.json();
   return nlUi.deep;
@@ -1063,7 +1084,7 @@ async function nlRankShow(p) {
     html += `<div class="rank-scroll"><table class="rank-table nl-rank-table"><thead><tr><th>#</th><th>구성</th><th class="num">CAGR%</th><th class="num">누적%</th><th class="num">MDD%</th><th>시작</th><th>종료</th><th class="num">거래일</th></tr></thead><tbody>` +
       f.rows.map((r, i) => `<tr class="rank-row nl-rank-row" data-i="${i}" tabindex="0" role="button"><td>${i + 1}</td><td class="rank-compose">${nlEsc(rankCompose(r))}<div class="nl-rank-mob">CAGR ${rankPct(r.cagr)}% · MDD ${rankPct(r.mdd)}% · 누적 ${rankPct(r.total)}%</div></td><td class="num">${rankPct(r.cagr)}</td><td class="num">${rankPct(r.total)}</td><td class="num">${rankPct(r.mdd)}</td><td class="num">${f.start}</td><td class="num">${f.end}</td><td class="num">${f.days}</td></tr>`).join("") +
       `</tbody></table></div>`;
-    html += `<p class="muted-note">행을 누르면 그 종목·비중을 불러 표의 시작·종료(직접 지정)로 기존 백테스트를 실행합니다. 표 숫자는 분기리밸·10bp·일시불입 기준이고, 실행은 「고급 설정」 값을 그대로 씁니다. 과거 시뮬 · 투자 자문 아님.</p>`;
+    html += `<p class="muted-note">행을 누르면 그 종목·비중을 불러 표의 시작·종료(직접 지정)로 기존 백테스트를 실행합니다. 표 숫자는 분기리밸·10bp·일시불입 기준이고, 실행은 「전문가 모드」 설정 값을 그대로 씁니다. 과거 시뮬 · 투자 자문 아님.</p>`;
   }
   if (box) box.innerHTML = html;
   nlUi.rankLast = { p, f };
@@ -1122,7 +1143,10 @@ function nlSentenceFromState() {
   if (state.rebalance === "Y") parts.push("연 리밸");
   else if (state.rebalance === "M") parts.push("매월 리밸");
   else if (state.rebalance === "N") parts.push("리밸 없음");
-  if (state.dcaOn) parts.push(`매월 ${Math.round(state.monthlyAmount / 10000)}만원 적립`);
+  if (state.dcaOn) {
+    if (Math.round(state.initialCapital || 0) !== 10000000) parts.push(`초기 ${NL.fmtW((state.initialCapital || 0) / 10000)}만원`);
+    parts.push(`매월 ${NL.fmtW(state.monthlyAmount / 10000)}만원 납입`);
+  }
   return parts.join(" ");
 }
 
@@ -1167,14 +1191,47 @@ function nlWire() {
     }
   }
   const adv = document.getElementById("advSettings");
+  const pro = document.getElementById("proToggle");
+  if (adv) {
+    if (state.proMode) adv.open = true;
+    adv.addEventListener("toggle", () => nlSetPro(adv.open));
+  }
+  if (pro) pro.onclick = () => nlSetPro(!state.proMode);
+  nlSetPro(!!state.proMode, { noHash: true });
+}
+
+/** 전문가 모드 = 기존 상세 설정 레이아웃(접힌 details) 열기/닫기. 해시에 mode=pro로 남긴다. */
+function nlSetPro(on, opts = {}) {
+  on = !!on;
+  state.proMode = on;
+  const adv = document.getElementById("advSettings");
   const lay = document.getElementById("priceLayout");
-  const syncAdv = () => { if (lay && adv) lay.classList.toggle("adv-closed", !adv.open); };
-  if (adv) { adv.addEventListener("toggle", syncAdv); syncAdv(); }
+  const pro = document.getElementById("proToggle");
+  const lab = document.getElementById("proToggleLabel");
+  if (adv && adv.open !== on) adv.open = on;
+  if (lay) lay.classList.toggle("adv-closed", !on);
+  if (pro) { pro.setAttribute("aria-pressed", on ? "true" : "false"); pro.classList.toggle("on", on); }
+  if (lab) lab.textContent = on ? "전문가 모드 켜짐 · 누르면 간단 모드" : "전문가 모드";
+  if (opts.noHash) return;
+  try {
+    if (typeof history === "undefined" || !history.replaceState) return;
+    if (typeof divDecodeHash === "function" && divDecodeHash(location.hash)) return;
+    if (state.lastRun) { nlSyncHash(); return; }
+    const q = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+    if (on) q.set("mode", "pro"); else q.delete("mode");
+    const h = q.toString();
+    history.replaceState(null, "", h ? `#${h}` : location.pathname + location.search);
+  } catch (_) { /* 표시만 */ }
 }
 
 if (typeof document !== "undefined" && document.addEventListener) {
   document.addEventListener("DOMContentLoaded", nlWire);
 }
+
+// 공유 링크의 mode=pro → 전문가 모드로 연다(첫 run 전에 state에 넣어 해시 재작성 때도 유지)
+try {
+  if (typeof state !== "undefined") state.proMode = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("mode") === "pro";
+} catch (_) { /* 표시만 */ }
 
 // 첫 화면이 공유 링크로 열렸는지는 로드 시점 해시로만 판단(실행 후 해시는 nlSyncHash가 다시 쓴다)
 try {

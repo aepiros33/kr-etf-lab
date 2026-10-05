@@ -559,6 +559,7 @@ function encodeShareParams() {
     p.set("acct", "pension");
     p.set("ptr", String(state.pensionTaxRate || 0.044));
   }
+  if (state.proMode) p.set("mode", "pro");
   return p.toString();
 }
 
@@ -1065,7 +1066,7 @@ async function boot() {
   renderBenchOptions();
   renderHedgeOptions();
   try {
-    const cpiRes = await fetch("./data/cpi_kr.json?v=nl4");
+    const cpiRes = await fetch("./data/cpi_kr.json?v=nl5");
     if (cpiRes.ok) state.cpi = await cpiRes.json();
   } catch (_) { /* gated */ }
   try {

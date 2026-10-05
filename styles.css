@@ -744,3 +744,14 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
   .nl-rank-table { min-width: 0; }
   .nl-rank-table th:nth-child(n+3), .nl-rank-table td:nth-child(n+3) { display: none; }
 }
+/* nl4: 전문가 모드 토글 (기존 상세 설정 레이아웃을 열고 닫음) */
+.nl-mode-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; min-width: 0; }
+.pro-toggle {
+  width: auto; flex: 0 0 auto; padding: 8px 16px; border-radius: 999px; font-size: 14px; font-weight: 800;
+  background: transparent; color: var(--accent); border: 1.5px solid var(--accent); cursor: pointer;
+}
+.pro-toggle:hover { background: rgba(125,211,192,.10); }
+.pro-toggle.on { background: var(--accent); color: #0b1016; }
+.nl-mode-hint { color: var(--dim); font-size: 11px; min-width: 0; overflow-wrap: anywhere; }
+.adv-settings > .adv-summary { display: none; }
+.layout.adv-closed > .adv-settings:not([open]) { display: none; }
