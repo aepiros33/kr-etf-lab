@@ -1065,7 +1065,7 @@ async function boot() {
   renderBenchOptions();
   renderHedgeOptions();
   try {
-    const cpiRes = await fetch("./data/cpi_kr.json?v=plan2");
+    const cpiRes = await fetch("./data/cpi_kr.json?v=nl1");
     if (cpiRes.ok) state.cpi = await cpiRes.json();
   } catch (_) { /* gated */ }
   try {
@@ -7003,6 +7003,8 @@ async function divShowMode(mode) {
   dl.hidden = !isDiv;
   const rankPanel = $("#rankPanel");
   if (rankPanel) rankPanel.hidden = isDiv;
+  const nlPanel = $("#nlPanel");
+  if (nlPanel) nlPanel.hidden = isDiv;
   const bp = $("#modePrice"),
     bd = $("#modeDiv");
   bp?.classList.toggle("active", !isDiv);

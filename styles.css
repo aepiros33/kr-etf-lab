@@ -675,3 +675,57 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
 .rank-row:hover, .rank-row.active { background: rgba(125,211,192,.08); }
 .rank-row:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
 .rank-cmp { padding: 2px 8px; font-size: 11px; white-space: nowrap; }
+
+/* 쉬운 입력 (nl1): 문장 → 종목·비중·기간. 고급 설정은 접어 둔다. */
+.nl-panel { margin: 0 0 16px; min-width: 0; max-width: 100%; }
+.nl-title { font-size: 14px; color: var(--text); }
+.nl-row { display: flex; gap: 8px; align-items: stretch; }
+.nl-input {
+  flex: 1; min-width: 0; width: 100%;
+  background: #0f151c; color: var(--text); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px 14px; font-size: 16px; /* 16px: iOS 확대 방지 */
+}
+.nl-input:focus { outline: none; border-color: var(--accent); }
+.nl-go { flex: 0 0 auto; width: auto; padding: 0 22px; font-size: 15px; border-radius: 12px; }
+.nl-examples { display: flex; gap: 8px; align-items: baseline; margin-top: 10px; min-width: 0; }
+.nl-ex-label { flex: 0 0 auto; font-size: 11px; color: var(--dim); font-weight: 700; }
+.nl-ex-chips { margin-bottom: 0; min-width: 0; }
+.nl-ex-chips .chip { max-width: 100%; white-space: normal; text-align: left; }
+.nl-out { margin-top: 12px; font-size: 13px; line-height: 1.55; color: var(--text); min-width: 0; }
+.nl-out:empty { display: none; }
+.nl-interp { font-size: 14px; }
+.nl-head { color: var(--accent); font-weight: 800; }
+.nl-item { overflow-wrap: anywhere; }
+.nl-item b { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 700; }
+.nl-line { color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+.nl-warn { color: var(--accent2); }
+.nl-unk { color: var(--accent2); }
+.nl-badge {
+  display: inline-block; margin-left: 4px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--accent2); color: var(--accent2); font-size: 11px; white-space: normal;
+}
+.nl-hint { color: var(--muted); font-size: 13px; }
+.nl-err, .nl-refuse { color: var(--accent2); }
+.nl-alts { margin: 8px 0 0; }
+.nl-disc { margin: 10px 0 0; }
+.adv-settings { min-width: 0; }
+.adv-summary {
+  cursor: pointer; list-style: none; padding: 12px 16px; border: 1px solid var(--line);
+  border-radius: 14px; background: var(--card); color: var(--text); font-size: 13px; margin-bottom: 12px;
+}
+.adv-summary::-webkit-details-marker { display: none; }
+.adv-summary::before { content: "▸"; color: var(--accent); margin-right: 8px; display: inline-block; transition: transform .15s; }
+.adv-settings[open] > .adv-summary::before { transform: rotate(90deg); }
+.adv-title { font-weight: 800; }
+.adv-sub { color: var(--dim); font-size: 11px; }
+.adv-settings .rank-panel { margin-bottom: 12px; }
+.adv-settings .sidebar { position: static; }
+.layout.adv-closed { grid-template-columns: minmax(0, 1fr); }
+.layout.adv-closed .adv-settings .adv-summary { margin-bottom: 0; }
+@media (max-width: 900px) {
+  .adv-settings { order: -1; }
+}
+@media (max-width: 520px) {
+  .nl-go { padding: 0 16px; }
+  .nl-examples { flex-direction: column; gap: 4px; }
+}
