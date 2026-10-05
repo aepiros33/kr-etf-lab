@@ -669,15 +669,19 @@ function nlClipNote(periodLabel, isMax, codes) {
   if (!firsts.length) return "";
   const [cul, cd] = firsts.reduce((a, b) => (b[1] > a[1] ? b : a));
   const etf = etfByCode(cul);
-  const yrs = (new Date(r.end + "T00:00:00") - new Date(r.start + "T00:00:00")) / (365.25 * 86400000);
+  // 연수·거래일은 「공통 기간」 카드와 같은 값(buildWindowInfo ← backtest 결과 years/days)만 쓴다
+  const wi = L.windowInfo || {};
+  const yrsNum = wi.years != null ? Number(wi.years) : Number(r.years);
+  const days = wi.days != null ? wi.days : r.days;
+  const span = `${r.start}~${r.end} · 약 ${Number.isFinite(yrsNum) ? yrsNum.toFixed(1) : "—"}년 · ${days}거래일`;
   const who = `${cul} ${etf ? etf.name : ""}(${cd.slice(0, 7)})`;
-  if (isMax) return `최장 → 가장 늦게 시작한 ${nlEsc(who)} 기준 ${r.start}~${r.end} (약 ${yrs.toFixed(1)}년)`;
+  if (isMax) return `최장 → 가장 늦게 시작한 ${nlEsc(who)} 기준 ${span}`;
   const req = L.requestedStart;
   if (req && r.start > req) {
     const gapDays = (new Date(r.start + "T00:00:00") - new Date(req + "T00:00:00")) / 86400000;
-    if (gapDays > 10) return `${nlEsc(periodLabel)} 요청 → ${nlEsc(who)} 때문에 약 ${yrs.toFixed(1)}년 (${r.start}~${r.end})`;
+    if (gapDays > 10) return `${nlEsc(periodLabel)} 요청 → ${nlEsc(who)} 때문에 약 ${yrsNum.toFixed(1)}년 (${span})`;
   }
-  return `${nlEsc(periodLabel)} → ${r.start}~${r.end} (약 ${yrs.toFixed(1)}년)`;
+  return `${nlEsc(periodLabel)} → ${span}`;
 }
 
 function nlRender(html) {
@@ -765,11 +769,20 @@ async function nlApply(p) {
   renderList();
   updateSum();
   updateIrpWarn();
-  await run();
-  // 공유 해시에는 원문 대신 해석된 비중을 담는다 (기존 encodeShareParams)
+  await run(); // 공유 해시는 run 래퍼(nlSyncHash)가 해석된 비중으로 갱신
+}
+
+/** 가격 시뮬 실행이 끝날 때마다 주소 해시를 지금 보유·기간·설정으로 맞춘다(기존 encodeShareParams).
+ * 배당 탭이 열려 있거나 배당 해시(#div…)면 건드리지 않는다. */
+function nlSyncHash() {
   try {
-    if (typeof history !== "undefined" && history.replaceState) history.replaceState(null, "", `#${encodeShareParams()}`);
-  } catch (_) { /* ignore */ }
+    if (!state.lastRun || typeof history === "undefined" || !history.replaceState) return;
+    const pl = document.getElementById("priceLayout");
+    if (pl && pl.hidden) return;
+    if (typeof divDecodeHash === "function" && divDecodeHash(location.hash)) return;
+    const q = encodeShareParams();
+    if (`#${q}` !== location.hash) history.replaceState(null, "", `#${q}`);
+  } catch (_) { /* 표시만 */ }
 }
 
 async function nlSubmit(text) {
@@ -832,7 +845,7 @@ function nlSentenceFromState() {
 function nlAfterBoot(opts = {}) {
   const inp = document.getElementById("nlInput");
   if (!inp || !state.meta || !state.lastRun) return;
-  const fromShare = !!opts.initial && typeof parseShareHash === "function" && !!parseShareHash();
+  const fromShare = !!opts.initial && nlUi.bootFromShare;
   nlUi.owned = { rebal: false, dca: false };
   if (["Y", "M", "N"].includes(state.rebalance)) nlUi.owned.rebal = !!fromShare;
   if (state.dcaOn) nlUi.owned.dca = !!fromShare;
@@ -877,12 +890,21 @@ if (typeof document !== "undefined" && document.addEventListener) {
   document.addEventListener("DOMContentLoaded", nlWire);
 }
 
+// 첫 화면이 공유 링크로 열렸는지는 로드 시점 해시로만 판단(실행 후 해시는 nlSyncHash가 다시 쓴다)
+try {
+  const sh = typeof parseShareHash === "function" ? parseShareHash() : null;
+  nlUi.bootFromShare = !!(sh && (sh.get("preset") || sh.get("h")));
+} catch (_) {
+  nlUi.bootFromShare = false;
+}
+
 // 기존 run()을 감싼다(계산은 그대로). 쉬운 입력 밖에서 실행된 결과도 해석 줄에 반영.
 (function nlHookRun() {
   if (typeof run !== "function" || run.__nlWrapped) return;
   const origRun = run;
   const wrapped = async function () {
     const r = await origRun.apply(this, arguments);
+    nlSyncHash();
     if (!nlUi.busy) {
       try {
         nlAfterBoot({ initial: !nlUi.booted });

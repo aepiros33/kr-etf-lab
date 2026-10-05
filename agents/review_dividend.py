@@ -303,9 +303,10 @@ def check_wording(fail):
     for lab in REQUIRED_LABELS:
         if lab not in div_js and lab not in div_html:
             fail(f"required dividend label missing: 「{lab}」")
-    if ("app.js?v=nl1" not in idx or "nl.js?v=nl1" not in idx or "styles.css?v=nl1" not in idx
-            or any(old in idx for old in ("?v=plan2", "?v=plan1", "?v=rank2", "?v=rank1", "?v=feat12", "?v=univ1", "?v=div1", "?v=div3"))):
-        fail("cache-bust ?v=nl1 missing on app.js/nl.js/styles.css (or stale ?v=plan2/?v=plan1/?v=rank2/?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
+    stale = ("?v=nl1", "?v=plan2", "?v=plan1", "?v=rank2", "?v=rank1", "?v=feat12", "?v=univ1", "?v=div1", "?v=div3")
+    if ("app.js?v=nl2" not in idx or "nl.js?v=nl2" not in idx or "styles.css?v=nl2" not in idx
+            or "cpi_kr.json?v=nl2" not in app or any(old in idx or old in app for old in stale)):
+        fail("cache-bust ?v=nl2 missing on app.js/nl.js/styles.css/cpi fetch (or stale ?v=nl1/?v=plan2/?v=plan1/?v=rank2/?v=rank1/?v=feat12/?v=univ1/?v=div1/?v=div3 left)")
     for need in ('id="btnDivCsv"', 'id="btnDivShare"', "divBuildCsv", "divEncodeHash", "divDecodeHash"):
         if need not in div_js:
             fail(f"dividend share/CSV UI missing: {need}")
