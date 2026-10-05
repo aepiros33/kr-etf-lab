@@ -729,3 +729,18 @@ input[type="number"].inline-num { flex: 0 0 auto; width: 52px; padding: 2px 6px;
   .nl-go { padding: 0 16px; }
   .nl-examples { flex-direction: column; gap: 4px; }
 }
+
+/* nl3: 격자 순위 검색 결과 (쉬운 입력 아래) */
+.nl-rank { margin-top: 10px; min-width: 0; max-width: 100%; font-size: 13px; }
+.nl-rank:empty { display: none; }
+.nl-rank .rank-scroll { margin-top: 6px; }
+.nl-rank-title { margin: 12px 0 4px; color: var(--text); }
+.nl-excl { color: var(--accent2); }
+.nl-pool { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.nl-pool summary { cursor: pointer; color: var(--dim); }
+.nl-rank-mob { display: none; margin-top: 3px; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
+@media (max-width: 560px) {
+  .nl-rank-mob { display: block; }
+  .nl-rank-table { min-width: 0; }
+  .nl-rank-table th:nth-child(n+3), .nl-rank-table td:nth-child(n+3) { display: none; }
+}

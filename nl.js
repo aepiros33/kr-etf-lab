@@ -89,8 +89,41 @@
   // 과거 시뮬 외 질문(무엇을 살지 등)은 계산하지 않는다. 화면에 이 단어들을 쓰지 않는다.
   const NL_REFUSE_RE = /추천|뭐\s*(사|살)|뭘\s*(사|살)|무엇을\s*(사|살)|어떤\s*(걸|것|거)\s*(사|살)|좋은\s*포트|사야\s*(해|돼|될|할)|살까|오를까|오를\s*거|유망|전망|예측|대박|수익\s*날/;
   const NL_REFUSE_MSG = "과거 시뮬만 합니다. 종목과 비중을 적어 주세요";
+  const NL_REFUSE_RANK_MSG = "과거 격자 순위만 보여 줍니다. 기간·제외 종목을 적어 주세요";
 
-  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "반도체 50 미국S&P 50 5년", "배당 위주 3종목 최장"];
+  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "반도체 50 미국S&P 50 5년", "배당 위주 3종목 최장", "반도체 빼고 10년 수익률 높은 조합"];
+
+  // ---- 격자 순위 검색 (nl3): 미리 계산된 data/rank_deep_nl3.json을 거르기만 한다. 새 격자 계산 없음 ----
+  // 순위 의도. 화면에는 이 단어들을 다시 쓰지 않는다(입력 인식용).
+  const NL_RANK_RE = /가장\s*높(은|았던)\s*(수익률?|수익|cagr|조합)?|최고\s*(의\s*)?(수익률?|수익|cagr)?|수익률?\s*(이|가)?\s*(가장\s*)?(높은|높았던|좋은|좋았던|상위|순위|순서|순|랭킹|top)|cagr\s*(높은|상위|순)|상위\s*\d*\s*(개|위|조합)?|top\s*\d*|랭킹|순위|높았던\s*조합|높은\s*조합/gi;
+  const NL_RANK_SHALLOW_RE = /낙폭\s*(이|가)?\s*(가장\s*)?(적은|작은|낮은|얕은|덜한)|mdd\s*(적은|작은|낮은)/gi;
+  const NL_RANK_PERIODS = { 1: "1y", 3: "3y", 5: "5y", 10: "10y" };
+  const NL_RANK_CAPS = { 25: "m25", 30: "m30", 40: "m40" };
+  // 제외 그룹: 명시 코드 + 이름 규칙(레버리지·인버스 이름은 제외 목록 표시에서 뺀다 — 풀에 없음). meta에 있는 코드만.
+  const NL_GROUPS = [
+    { keys: ["반도체", "반도체주", "칩", "hbm", "ai반도체"], label: "반도체",
+      codes: ["091160", "091230", "396500", "395270", "390390", "381180", "442580", "446770", "469150", "455850", "471990", "0167A0", "0210A0", "497570"],
+      re: /반도체|HBM|필라델피아/i },
+    { keys: ["나스닥", "나스닥100", "미국나스닥"], label: "나스닥", codes: ["133690", "379810", "367380", "368590", "449190", "426030"], re: /나스닥/ },
+    { keys: ["미국", "미국주식", "미국etf"], label: "미국", codes: ["133690", "360750", "381170"], re: /미국|S&P|나스닥/ },
+    { keys: ["s&p", "s&p500", "에스앤피", "sp500"], label: "S&P500", codes: ["360750"], re: /S&P/i },
+    { keys: ["금", "골드", "금현물", "금선물"], label: "금", codes: ["132030", "411060", "319640", "139320", "0072R0"], re: /골드|금현물|금선물|금은선물|KRX금/ },
+    { keys: ["채권", "국채", "국고채", "채권형"], label: "채권", codes: [], re: /채권|국채|국고채|회사채|금융채|통안채|전단채/, cat: "채권" },
+    { keys: ["현금", "현금성", "단기채", "파킹", "머니마켓"], label: "현금성", codes: ["153130"], re: /단기채|머니마켓|KOFR|CD금리|단기자금|SOFR/, cat: "현금성" },
+    { keys: ["레버리지", "인버스", "곱버스", "2x"], label: "레버리지·인버스", codes: [], lev: true },
+    { keys: ["코스피", "코스피200", "국내주식", "한국주식"], label: "국내주식", codes: ["069500", "237350"], cat: "국내주식" },
+    { keys: ["코스닥", "코스닥150"], label: "코스닥", codes: [], re: /코스닥/ },
+    { keys: ["배당", "고배당", "배당주"], label: "배당", codes: [], re: /배당/ },
+    { keys: ["리츠"], label: "리츠", codes: [], re: /리츠/ },
+    { keys: ["일본", "니케이"], label: "일본", codes: [], re: /일본|니케이/ },
+    { keys: ["중국", "차이나", "항셍"], label: "중국", codes: [], re: /차이나|중국|항셍/ },
+    { keys: ["2차전지", "이차전지"], label: "2차전지", codes: [], re: /2차전지/ },
+    { keys: ["해외주식"], label: "해외주식", codes: [], cat: "해외주식" },
+    { keys: ["테마"], label: "테마", codes: [], cat: "테마" },
+  ];
+  const NL_RANK_STOP = new Set(("조합 포트 포트폴리오 높은 높았던 순 순서 기준 동안 중 중에서 에서 것 거 보여줘 보여 줘 알려줘 찾아줘 찾아 줘 " +
+    "어떤 뭐 무엇 etf 종목 3종목 3개 세개 세 개 로 으로 은 는 이 가 을 를 과 와 랑 이랑 하고 및 그리고 년 기간 결과 해줘 수익률 수익 cagr 낙폭 mdd 한도 " +
+    "이내 이하 까지 안 제한 없음 없이 최근 격자 과거").split(/\s+/));
 
   function compact(s) {
     return String(s || "").toLowerCase().replace(/\s+/g, "");
@@ -241,7 +274,9 @@
     const orig = out.input;
     let t = normKeepLen(orig);
     if (!t.trim()) { out.empty = true; return out; }
-    if (NL_REFUSE_RE.test(t)) { out.refuse = true; out.errors.push(NL_REFUSE_MSG); return out; }
+    NL_RANK_RE.lastIndex = 0; NL_RANK_SHALLOW_RE.lastIndex = 0;
+    if (NL_RANK_RE.test(t) || NL_RANK_SHALLOW_RE.test(t)) return nlParseRank(orig, t, dict);
+    if (NL_REFUSE_RE.test(t)) { out.refuse = true; out.errors.push(NL_REFUSE_MSG, NL_REFUSE_RANK_MSG); return out; }
 
     // 1) 리밸런싱 (「1년 리밸」이 기간으로 잡히지 않게 먼저)
     const rebRules = [
@@ -587,6 +622,151 @@
     return out;
   }
 
+  function nlGroupCodes(g, dict) {
+    const out = new Set();
+    for (const c of g.codes) if (dict.byCode.has(c)) out.add(c);
+    for (const e of dict.byCode.values()) {
+      const lev = e.leveraged || isLevName(e.name);
+      if (g.lev) { if (lev) out.add(e.code); continue; }
+      if (lev) continue;
+      if (g.re && g.re.test(e.name)) out.add(e.code);
+      if (g.cat && e.category === g.cat) out.add(e.code);
+    }
+    return [...out];
+  }
+
+  /** 순위 검색 문장 해석 (순수 함수). 거르는 조건: 기간·낙폭 한도·제외만. 포함은 미지원 표시. */
+  function nlParseRank(orig, t0, dict) {
+    const out = {
+      input: orig, mode: "rank", ok: false, refuse: false, empty: false,
+      items: [], notes: [], warns: [], errors: [], unknown: [], alts: [],
+      rank: { period: "10y", periodLabel: "10년", periodDefault: true, cap: "none", capLabel: "낙폭 한도 없음", capDefault: true,
+        excl: [], incl: [], shallow: false },
+    };
+    const R = out.rank;
+    let t = t0;
+    const blankAll = (re) => { t = t.replace(re, (m) => " ".repeat(m.length)); };
+    NL_RANK_SHALLOW_RE.lastIndex = 0;
+    if (NL_RANK_SHALLOW_RE.test(t)) { R.shallow = true; NL_RANK_SHALLOW_RE.lastIndex = 0; blankAll(NL_RANK_SHALLOW_RE); }
+    NL_RANK_RE.lastIndex = 0;
+    const hasCagr = NL_RANK_RE.test(t);
+    NL_RANK_RE.lastIndex = 0;
+    blankAll(NL_RANK_RE);
+    if (R.shallow) {
+      if (hasCagr) out.notes.push("「낙폭이 얕은 순」 정렬은 미지원 — 수익률 순서에 낙폭 한도(25·30·40%)만 걸 수 있어요");
+      else { out.errors.push("낙폭이 얕은 순 정렬은 미지원입니다. 수익률 순서에 낙폭 한도(25·30·40%)를 걸어 주세요 (예: 5년 수익률 높은 조합 낙폭 30% 이내)"); }
+    }
+    // 낙폭 한도
+    let m;
+    const capNone = /(낙폭|mdd)\s*(한도|제한)?\s*(는|은)?\s*(없이|없음|무제한|상관\s*없)/i;
+    const capRe = /(?:최대\s*)?(?:낙폭|mdd|하락)\s*(?:은|이|가)?\s*(?:한도)?\s*[-−–]?\s*(\d{1,2}(?:\.\d+)?)\s*(?:%|퍼센트|프로)?\s*(?:이내|이하|까지|안쪽|안|미만|아래|넘지\s*않[게는은]?|못\s*넘게)?|[-−–]\s*(\d{1,2}(?:\.\d+)?)\s*%\s*(?:이내|이하|까지|안)?/i;
+    if ((m = capNone.exec(t))) {
+      R.capDefault = false; R.capLabel = "낙폭 한도 없음";
+      t = blank(t, m.index, m.index + m[0].length);
+    } else if ((m = capRe.exec(t))) {
+      const n = Number(m[1] || m[2]);
+      t = blank(t, m.index, m.index + m[0].length);
+      if (NL_RANK_CAPS[n]) { R.cap = NL_RANK_CAPS[n]; R.capLabel = `낙폭 한도 −${n}%`; R.capDefault = false; }
+      else out.errors.push(`낙폭 한도 ${n}%는 격자에 없어요. 25·30·40% 또는 제한 없음만 있습니다`);
+    }
+    // 기간 (격자는 1·3·5·10년만, 최장 없음)
+    const longRe = /가능한\s*최장|가능한\s*길게|최대한\s*길게|최장|최대\s*기간|전체\s*기간/;
+    if ((m = longRe.exec(t))) { out.errors.push("격자 순위는 1년·3년·5년·10년만 있습니다(최장 없음)"); t = blank(t, m.index, m.index + m[0].length); }
+    const perRe = /(?:최근\s*)?(\d{1,2})\s*(년|개월|달)\s*(간|동안)?/;
+    if ((m = perRe.exec(t))) {
+      const n = Number(m[1]);
+      t = blank(t, m.index, m.index + m[0].length);
+      if (m[2] === "년" && NL_RANK_PERIODS[n]) { R.period = NL_RANK_PERIODS[n]; R.periodLabel = `${n}년`; R.periodDefault = false; }
+      else out.errors.push(`격자 순위는 1년·3년·5년·10년만 있습니다(${m[0].trim()} 없음)`);
+    }
+    // 제외/포함 스캔
+    const gEntries = [];
+    for (const g of NL_GROUPS) for (const k of g.keys) gEntries.push({ key: compact(k), kind: "group", g, prio: 9 });
+    const kw = [
+      ...["제외하고", "제외한", "제외", "빼고", "뺀", "빼서", "빼", "없이", "없는", "말고"].map((k) => ({ key: k, kind: "excl", prio: 10 })),
+      ...["포함한", "포함", "들어간", "들어가는", "들어있는", "넣은", "넣고", "있는"].map((k) => ({ key: k, kind: "incl", prio: 10 })),
+    ];
+    const entries = [...kw, ...gEntries, ...dict.entries.filter((e) => e.kind === "alias" || e.kind === "name" || e.kind === "code")]
+      .sort((a, b) => b.key.length - a.key.length || b.prio - a.prio);
+    const toks = [];
+    const unk = [];
+    let cur = "";
+    const flush = () => { if (cur) unk.push(cur); cur = ""; };
+    for (let i = 0; i < t.length;) {
+      const ch = t[i];
+      if (ch === " ") { flush(); i++; continue; }
+      let hit = null;
+      for (const en of entries) {
+        if (en.key[0] !== ch) continue;
+        const e = matchAt(t, i, en.key);
+        if (e < 0) continue;
+        if (en.key.length === 1 && (isHangul(t[i - 1]) || (isHangul(t[e]) && !NL_PARTICLES.some((p) => t.startsWith(p, e)) && t[e] !== "만"))) continue;
+        if (en.kind === "code" && /[0-9a-z]/.test(t[e] || "")) continue;
+        hit = { en, e };
+        break;
+      }
+      if (hit) {
+        flush();
+        const tok = { en: hit.en, raw: orig.slice(i, hit.e).trim() };
+        // 「X만」 → 포함(미지원)
+        if (hit.en.kind !== "excl" && hit.en.kind !== "incl" && t[hit.e] === "만") { toks.push(tok); toks.push({ en: { kind: "incl" }, raw: "만" }); i = hit.e + 1; continue; }
+        toks.push(tok); i = hit.e; continue;
+      }
+      cur += orig[i]; i++;
+    }
+    flush();
+    let pending = [];
+    for (const tk of toks) {
+      const k = tk.en.kind;
+      if (k === "excl" || k === "incl") {
+        if (!pending.length) { out.notes.push(`「${tk.raw}」 앞에 종목·분류가 없어 쓰지 않았어요`); continue; }
+        for (const p of pending) (k === "excl" ? R.excl : R.incl).push(p);
+        pending = [];
+      } else pending.push(tk);
+    }
+    for (const p of pending) out.notes.push(`「${p.raw}」 뒤에 제외/빼고가 없어 거르지 않았어요`);
+    // 제외 코드 풀어 쓰기
+    R.excl = R.excl.map((tk) => {
+      if (tk.en.kind === "group") return { word: tk.raw, label: tk.en.g.label, codes: nlGroupCodes(tk.en.g, dict) };
+      if (tk.en.kind === "alias") {
+        const f = tk.en.fam;
+        return { word: tk.raw, label: tk.raw, codes: [...new Set([f.code, f.cc, f.h].filter(Boolean))] };
+      }
+      return { word: tk.raw, label: tk.raw, codes: [tk.en.code] };
+    });
+    R.incl = R.incl.map((tk) => tk.raw);
+    if (R.incl.length) out.notes.push(`포함(「${R.incl.join("」「")}」 포함/만): 미지원 — 이번 버전은 제외·기간·낙폭 한도만 거릅니다. 포함 조건으로 거르지 않았어요`);
+    for (const w of unk) {
+      const c = compact(w).replace(/^[\s,.·/+&()[\]~!?:;'"=-]+|[\s,.·/+&()[\]~!?:;'"=-]+$/g, "");
+      if (!c || NL_RANK_STOP.has(c) || NL_STOP.has(c) || particleOnly(c)) continue;
+      const st = NL_PARTICLES.reduce((s2, p) => (s2.endsWith(p) && s2.length > p.length ? s2.slice(0, -p.length) : s2), c);
+      if (NL_RANK_STOP.has(st) || NL_STOP.has(st)) continue;
+      if (/^\d+$/.test(c)) { out.errors.push(`숫자 「${w.trim()}」를 어디에 쓰는지 모르겠어요`); continue; }
+      out.unknown.push(w.trim());
+    }
+    out.ok = !out.errors.length;
+    return out;
+  }
+
+  /** 미리 계산된 전 조합 목록에서 거르기만 한다. 0행이면 0행. 조건을 풀지 않는다. */
+  function nlRankFilter(rank, data, dict, limit = 10) {
+    const info = data && data.periods && data.periods[rank.period];
+    if (!info || info.skipped || !info.caps || !info.caps[rank.cap]) return { error: "이 기간·한도 격자 데이터가 없습니다" };
+    const pool = info.pool;
+    const excl = new Set();
+    for (const x of rank.excl) for (const c of x.codes) excl.add(c);
+    const removed = pool.filter((c) => excl.has(c));
+    const block = info.caps[rank.cap];
+    const keep = block.rows.filter((r) => !excl.has(pool[r[0]]) && !excl.has(pool[r[1]]) && !excl.has(pool[r[2]]));
+    const rows = keep.slice(0, limit).map((r) => ({
+      tickers: [pool[r[0]], pool[r[1]], pool[r[2]]],
+      names: [info.names[r[0]], info.names[r[1]], info.names[r[2]]],
+      weights: [r[3], r[4], r[5]], cagr: r[6], total: r[7], mdd: r[8],
+    }));
+    return { start: info.start, end: info.end, days: info.days, poolN: info.pool_n, pool, poolNames: info.names,
+      removed, totalN: block.n, n: keep.length, rows };
+  }
+
   /** 해석된 기간 → [start|null, end, statePeriod] (기존 periodBounds 규칙과 같은 로컬 달력) */
   function nlPeriodPlan(period, latestEnd) {
     const p = period || { kind: "max" };
@@ -603,13 +783,13 @@
     return { statePeriod: "max" };
   }
 
-  const api = { nlParse, nlBuildDict, nlPeriodPlan, NL_EXAMPLES, NL_REFUSE_MSG, fmtW };
+  const api = { nlParse, nlBuildDict, nlPeriodPlan, nlRankFilter, NL_EXAMPLES, NL_REFUSE_MSG, NL_REFUSE_RANK_MSG, fmtW };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   root.NL = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
 
 // ===================== 브라우저 연결 (app.js의 state / run() 재사용) =====================
-const nlUi = { dict: null, owned: { rebal: false, dca: false }, last: null, busy: false, booted: false };
+const nlUi = { dict: null, owned: { rebal: false, dca: false }, last: null, busy: false, booted: false, deep: null, rankLast: null };
 
 function nlEsc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -792,7 +972,12 @@ async function nlSubmit(text) {
   if (!state.meta) { nlRender(`<div class="nl-hint">데이터를 불러오는 중입니다…</div>`); return null; }
   const p = NL.nlParse(raw, { etfs: state.meta.etfs, presets: PRESETS, dict: nlDict() });
   nlUi.last = p;
-  if (p.refuse) { nlRender(`<div class="nl-hint nl-refuse">${nlEsc(NL.NL_REFUSE_MSG)}</div>`); return p; }
+  if (p.mode === "rank") { nlRankClear(); await nlRankShow(p); return p; }
+  nlRankClear();
+  if (p.refuse) {
+    nlRender(`<div class="nl-hint nl-refuse"><div>${nlEsc(NL.NL_REFUSE_MSG)}.</div><div>${nlEsc(NL.NL_REFUSE_RANK_MSG)} (예: 반도체 빼고 10년 수익률 높은 조합)</div></div>`);
+    return p;
+  }
   if (!p.ok) {
     if (p.errors.length) {
       let html = `<div class="nl-hint nl-err">${p.errors.map((e) => `<div>${nlEsc(e)}</div>`).join("")}<div>그래서 계산하지 않았어요.</div></div>`;
@@ -813,6 +998,107 @@ async function nlSubmit(text) {
   }
   nlRenderInterp(p);
   return p;
+}
+
+// ---------- 격자 순위 검색 화면 ----------
+async function nlRankData() {
+  if (nlUi.deep) return nlUi.deep;
+  const res = await fetch("./data/rank_deep_nl3.json?v=nl3");
+  if (!res.ok) throw new Error(String(res.status));
+  nlUi.deep = await res.json();
+  return nlUi.deep;
+}
+
+function nlRankClear() {
+  const box = document.getElementById("nlRank");
+  if (box) box.innerHTML = "";
+}
+
+function nlRankSpecLine(R) {
+  return `기간 ${R.periodLabel}${R.periodDefault ? "(기본)" : ""} · ${R.capLabel} · 격자 3종목 · 종목당≤50% · 5%단위 · 분기리밸 · 10bp · 일시불입`;
+}
+
+async function nlRankShow(p) {
+  const R = p.rank;
+  const box = document.getElementById("nlRank");
+  nlRender("");
+  let html = `<div class="nl-interp"><span class="nl-head">격자 순위로 이해했어요:</span> ${nlEsc(nlRankSpecLine(R))}</div>`;
+  const tail = () => {
+    let h = "";
+    for (const n of p.notes) h += `<div class="nl-line nl-warn">· ${nlEsc(n)}</div>`;
+    if (p.unknown.length) h += `<div class="nl-line nl-unk">이해하지 못한 말: ${p.unknown.map((u) => `「${nlEsc(u)}」`).join(" ")}</div>`;
+    return h;
+  };
+  if (!p.ok) {
+    html = `<div class="nl-interp"><span class="nl-head">격자 순위 조건을 읽지 못했어요:</span></div>`;
+    html += `<div class="nl-hint nl-err">${p.errors.map((e) => `<div>${nlEsc(e)}</div>`).join("")}<div>그래서 순위를 보여 주지 않았어요.</div></div>` + tail();
+    if (box) box.innerHTML = html;
+    return;
+  }
+  let data;
+  try {
+    data = await nlRankData();
+  } catch (_) {
+    if (box) box.innerHTML = html + `<div class="nl-hint nl-err">격자 파일을 불러오지 못했습니다.</div>`;
+    return;
+  }
+  const f = NL.nlRankFilter(R, data, nlDict());
+  if (f.error) { if (box) box.innerHTML = html + `<div class="nl-hint nl-err">${nlEsc(f.error)}</div>`; return; }
+  const nameOf = (c) => ((etfByCode(c) || {}).name || "");
+  html += `<div class="nl-line">풀: 이 기간 시총 상위 ${f.poolN}종만(199종 전체 아님 · 레버리지·인버스 없음 · 같은 지수는 하나 · 기간 전체 시세 있는 종목) · 창 ${f.start}~${f.end} · ${f.days}거래일</div>`;
+  if (R.excl.length) {
+    for (const x of R.excl) {
+      const inPool = x.codes.filter((c) => f.pool.includes(c));
+      html += `<div class="nl-line nl-excl">제외(${nlEsc(x.label)}) ${x.codes.length}종목(${nlEsc(x.codes.join("·"))})` +
+        ` → 이 기간 풀에서 ${inPool.length}종 빠짐${inPool.length ? `(${inPool.map((c) => nlEsc(`${c} ${nameOf(c)}`)).join(" · ")})` : " — 풀에 해당 종목 없음"}</div>`;
+    }
+  }
+  html += `<div class="nl-line"><b>남은 조합 ${f.n}</b>(한도 안 3종 조합 ${f.totalN}개 중)${f.n === 0 ? " · 빈 목록" : f.n < 10 ? ` · 상위 ${f.n}만` : " · 상위 10"}</div>`;
+  html += tail();
+  html += `<details class="nl-pool"><summary>풀 ${f.poolN}종 보기</summary><div class="nl-line">${f.pool.map((c, i) => nlEsc(`${c} ${f.poolNames[i]}`)).join(" · ")}</div></details>`;
+  html += `<div class="section-title nl-rank-title">이 격자·기간 안에서 높았던 조합 (과거 기준)</div>`;
+  if (!f.rows.length) {
+    html += `<div class="nl-hint">조건에 맞는 조합이 0개입니다. 조건을 바꿔 다시 적어 주세요.</div>`;
+  } else {
+    html += `<div class="rank-scroll"><table class="rank-table nl-rank-table"><thead><tr><th>#</th><th>구성</th><th class="num">CAGR%</th><th class="num">누적%</th><th class="num">MDD%</th><th>시작</th><th>종료</th><th class="num">거래일</th></tr></thead><tbody>` +
+      f.rows.map((r, i) => `<tr class="rank-row nl-rank-row" data-i="${i}" tabindex="0" role="button"><td>${i + 1}</td><td class="rank-compose">${nlEsc(rankCompose(r))}<div class="nl-rank-mob">CAGR ${rankPct(r.cagr)}% · MDD ${rankPct(r.mdd)}% · 누적 ${rankPct(r.total)}%</div></td><td class="num">${rankPct(r.cagr)}</td><td class="num">${rankPct(r.total)}</td><td class="num">${rankPct(r.mdd)}</td><td class="num">${f.start}</td><td class="num">${f.end}</td><td class="num">${f.days}</td></tr>`).join("") +
+      `</tbody></table></div>`;
+    html += `<p class="muted-note">행을 누르면 그 종목·비중을 불러 표의 시작·종료(직접 지정)로 기존 백테스트를 실행합니다. 표 숫자는 분기리밸·10bp·일시불입 기준이고, 실행은 「고급 설정」 값을 그대로 씁니다. 과거 시뮬 · 투자 자문 아님.</p>`;
+  }
+  if (box) box.innerHTML = html;
+  nlUi.rankLast = { p, f };
+  document.querySelectorAll("#nlRank .nl-rank-row").forEach((tr) => {
+    const go = () => nlRankApply(Number(tr.dataset.i));
+    tr.onclick = go;
+    tr.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } };
+  });
+}
+
+async function nlRankApply(i) {
+  const L = nlUi.rankLast;
+  const row = L && L.f.rows[i];
+  if (!row) return;
+  document.querySelectorAll("#nlRank .nl-rank-row").forEach((tr) => tr.classList.toggle("active", Number(tr.dataset.i) === i));
+  if (typeof rankUi !== "undefined") rankUi.pick = null;
+  document.querySelectorAll("#presets .chip").forEach((el) => el.classList.remove("active"));
+  state.activePreset = null;
+  // 이전 문장이 정한 리밸런싱·적립은 기본으로 (격자 표 가정과 맞춤)
+  if (nlUi.owned.rebal) { state.rebalance = "Q"; nlUi.owned.rebal = false; }
+  if (nlUi.owned.dca) { state.dcaOn = false; nlUi.owned.dca = false; }
+  state.period = "custom";
+  const st = document.getElementById("startDate"), en = document.getElementById("endDate");
+  if (st) st.value = L.f.start;
+  if (en) en.value = L.f.end;
+  state.selected = {};
+  await ensurePrices(row.tickers);
+  row.tickers.forEach((c, k) => { if (state.meta.etfs.some((e) => e.code === c)) state.selected[c] = row.weights[k]; });
+  syncControlsFromState();
+  renderList();
+  updateSum();
+  updateIrpWarn();
+  await run();
+  const res = document.getElementById("result");
+  if (res && res.scrollIntoView) res.scrollIntoView({ block: "start" });
 }
 
 /** 현재 state → 다시 넣으면 같은 해석이 되는 문장 (공유 링크로 열었을 때 입력칸에 채움) */
