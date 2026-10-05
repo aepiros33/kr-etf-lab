@@ -29,19 +29,22 @@
     { keys: ["미국장기채", "미국30년국채", "미국국채30년", "미국채30년", "미국채", "미국국채", "tlt"], code: "453850", cc: "476550", h: "453850",
       warn: "453850은 2023-03 상장이라 기간이 짧습니다" },
     { keys: ["종합채권"], code: "273130" },
-    { keys: ["배당", "고배당", "배당주"], code: "161510", cc: "472150", alts: [["402970", "미국배당다우존스"]] },
-    { keys: ["한국고배당", "국내고배당", "국내배당", "한국배당", "고배당주"], code: "161510" },
+    { keys: ["배당", "고배당", "배당주", "한국고배당", "국내고배당", "국내배당", "한국배당", "고배당주"], code: "161510", cc: "472150", alts: [["402970", "미국배당다우존스"], ["466940", "은행고배당"]] },
+    { keys: ["은행고배당", "은행배당"], code: "466940" },
     { keys: ["미국배당", "미국배당주", "미국배당다우", "미국배당다우존스", "배당다우", "schd"], code: "402970", cc: "441640" },
     { keys: ["달러", "미국달러", "usd"], code: "329750", warn: "달러 = 329750 미국달러단기채권 ETF 가격입니다. 환율 그 자체가 아닙니다" },
     { keys: ["리츠", "reits", "reit"], code: "329200" },
-    { keys: ["테크", "미국테크", "빅테크", "미국빅테크"], code: "381170", h: "314250" },
+    // 전자전기/IT = 국내 IT 섹터(139260). bare 「테크」도 여기. 「미국테크」만 미국.
+    { keys: ["전자전기", "전기전자", "전기전기", "it", "정보기술", "테크", "한국테크", "국내테크", "한국it", "국내it"], code: "139260",
+      alts: [["381170", "미국테크"]] },
+    { keys: ["미국테크", "빅테크", "미국빅테크"], code: "381170", h: "314250" },
     { keys: ["일본", "니케이", "니케이225"], code: "241180" },
     { keys: ["중국", "항셍", "항셍테크", "차이나"], code: "371160" },
     { keys: ["인도", "니프티"], code: "453810" },
     { keys: ["선진국"], code: "251350" },
-    { keys: ["2차전지", "이차전지"], code: "305720" },
+    { keys: ["2차전지", "이차전지", "배터리"], code: "305720" },
     { keys: ["방산"], code: "449450" },
-    { keys: ["조선"], code: "466920" },
+    { keys: ["조선"], code: "466920", warn: "466920 SOL 조선TOP3플러스는 2023-10 상장이라 기간이 짧습니다" },
     { keys: ["원자력", "원전"], code: "434730" },
     { keys: ["kofr"], code: "423160" },
     { keys: ["cd금리"], code: "357870" },
@@ -81,7 +84,7 @@
     ("위주 중심 비중 포트 포트폴리오 백테스트 백테 계산 계산해 계산해줘 해줘 해 줘 보여줘 돌려줘 돌려 시뮬 시뮬레이션 " +
       "으로 로 하고 그리고 및 랑 이랑 와 과 에 각각 씩 정도 기간 동안 최근 수익률 결과 투자 하면 했으면 했다면 " +
       "넣고 넣으면 섞어서 섞어 동일비중 동일 균등 똑같이 같은비중 리밸런싱 리밸 적립 기준 수익 보기 봐줘 알려줘 " +
-      "etf 종목 개 종 년 퍼센트 프로 만원 원 해서 나눠서 나눠 반씩 비례 비례맞춤 납입 적금 적금처럼 적금식 적립식 월납입 매월 매달")
+      "etf 종목 개 종 년 퍼센트 프로 만원 원 해서 나눠서 나눠 반씩 비례 비례맞춤 납입 적금 적금처럼 적금식 적립식 월납입 매월 매달 금액 자금 시드 시드머니")
       .split(/\s+/)
   );
   const NL_PARTICLES = ["이랑", "하고", "으로", "에서", "까지", "부터", "랑", "과", "와", "을", "를", "은", "는", "이", "가", "에", "로", "도", "만", "씩", "의"];
@@ -91,7 +94,7 @@
   const NL_REFUSE_MSG = "과거 시뮬만 합니다. 종목과 비중을 적어 주세요";
   const NL_REFUSE_RANK_MSG = "과거 격자 순위만 보여 줍니다. 기간·제외 종목을 적어 주세요";
 
-  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "반도체 50 미국S&P 50 5년", "배당 위주 3종목 최장", "반도체 빼고 5년 수익률 높은 조합"];
+  const NL_EXAMPLES = ["나스닥 60 코스피 20 금 20 10년", "K-올웨더 최대한 길게", "전자전기 40 반도체 40 채권 20", "배당 위주 3종목 최장", "반도체 빼고 5년 수익률 높은 조합"];
 
   // ---- 격자 순위 검색 (nl3): 미리 계산된 data/rank_deep_nl3.json을 거르기만 한다. 새 격자 계산 없음 ----
   // 순위 의도. 화면에는 이 단어들을 다시 쓰지 않는다(입력 인식용).
@@ -273,6 +276,8 @@
     };
     const orig = out.input;
     let t = normKeepLen(orig);
+    // 쉼표·콜론·슬래시·중점·파이프·「와」「그리고」는 구분만 — 길이 유지(공백 치환)
+    t = t.replace(/그리고/g, "   ").replace(/[,:：/·|]/g, " "); // & 는 S&P 별칭용
     if (!t.trim()) { out.empty = true; return out; }
     NL_RANK_RE.lastIndex = 0; NL_RANK_SHALLOW_RE.lastIndex = 0;
     if (NL_RANK_RE.test(t) || NL_RANK_SHALLOW_RE.test(t)) return nlParseRank(orig, t, dict);
@@ -514,13 +519,15 @@
       }
       if (pending) orphanNums.push(pending);
     } else {
-      for (const x of seq) {
+      // 「전자전기 40 반도체 40」·「전자전기40」·「전자전기:40」 — 바로 앞 종목에 붙인다
+      for (let si = 0; si < seq.length; si++) {
+        const x = seq[si];
         if (x.type === "num") {
           const last = assets[assets.length - 1];
-          if (last && last.w == null && last.lastSeq === seq.indexOf(x) - 1) last.w = x.v;
+          if (last && last.w == null && last.lastSeq === si - 1) last.w = x.v;
           else orphanNums.push(x);
         } else {
-          assets.push({ tok: x, w: null, lastSeq: seq.indexOf(x) });
+          assets.push({ tok: x, w: null, lastSeq: si });
         }
       }
     }
@@ -620,7 +627,20 @@
       out.weightNote = `합 ${fmtW(S)} → 비례 맞춤`;
     }
 
-    // 다른 선택지 칩 (반도체 → 미국반도체 등)
+    // 별칭 → 정식 이름 (해석 줄)
+    for (const it of items) {
+      if (it.src === "alias" && it.word) {
+        const map = `${it.word} → ${it.name}(${it.code})`;
+        if (!out.notes.includes(map)) out.notes.push(map);
+      }
+    }
+    // 반도체 + 전자전기(IT) 동시 → 삼성전자·하이닉스 비중 겹칠 수 있음 (실행은 막지 않음)
+    const hasSemi = items.some((x) => /반도체/.test(x.name) || x.code === "091160" || x.code === "390390" || x.code === "381180" || x.code === "396500" || x.code === "395270");
+    const hasIt = items.some((x) => x.code === "139260");
+    if (hasSemi && hasIt) {
+      out.warns.push("반도체 ETF와 전자전기(IT) ETF를 같이 쓰면 삼성전자·SK하이닉스 비중이 겹칠 수 있어요 (과거 시뮬)");
+    }
+    // 다른 선택지 칩 (반도체 → 미국반도체, 테크 → 미국테크 등)
     for (const it of items) {
       for (const a of it.alts || []) {
         if (items.some((x) => x.code === a.code)) continue;
@@ -628,6 +648,14 @@
       }
     }
     out.items = items;
+    // 못 알아들은 말이 있으면 계산하지 않는다 (고아 숫자 등 연쇄 오류는 가린다)
+    if (out.unknown.length) {
+      out.errors = [`못 알아들은 단어: ${out.unknown.map((u) => `「${u}」`).join(" ")}`];
+      out.items = [];
+      out.alts = [];
+      out.ok = false;
+      return out;
+    }
     out.ok = !out.errors.length && items.length > 0;
     return out;
   }
@@ -1024,7 +1052,7 @@ async function nlSubmit(text) {
 // ---------- 격자 순위 검색 화면 ----------
 async function nlRankData() {
   if (nlUi.deep) return nlUi.deep;
-  const res = await fetch("./data/rank_deep_nl3.json?v=nl6");
+  const res = await fetch("./data/rank_deep_nl3.json?v=nl7");
   if (!res.ok) throw new Error(String(res.status));
   nlUi.deep = await res.json();
   return nlUi.deep;

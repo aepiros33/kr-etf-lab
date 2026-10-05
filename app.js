@@ -1135,7 +1135,7 @@ async function boot() {
   renderBenchOptions();
   renderHedgeOptions();
   try {
-    const cpiRes = await fetch("./data/cpi_kr.json?v=nl6");
+    const cpiRes = await fetch("./data/cpi_kr.json?v=nl7");
     if (cpiRes.ok) state.cpi = await cpiRes.json();
   } catch (_) { /* gated */ }
   try {
