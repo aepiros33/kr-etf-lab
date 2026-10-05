@@ -1024,7 +1024,7 @@ async function nlSubmit(text) {
 // ---------- 격자 순위 검색 화면 ----------
 async function nlRankData() {
   if (nlUi.deep) return nlUi.deep;
-  const res = await fetch("./data/rank_deep_nl3.json?v=nl5");
+  const res = await fetch("./data/rank_deep_nl3.json?v=nl6");
   if (!res.ok) throw new Error(String(res.status));
   nlUi.deep = await res.json();
   return nlUi.deep;

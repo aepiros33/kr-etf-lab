@@ -673,6 +673,75 @@ function syncControlsFromState() {
   setVal("pensionTaxRate", String(state.pensionTaxRate));
 }
 
+/** 공유 해시를 state에 넣은 뒤 전략 행 표시를 state에 맞춘다 (첫 로드·hashchange 공용) */
+function syncShareRows() {
+  syncMaFreqHint();
+  const maRow = $("#maOverlayRow");
+  if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
+  const rhRow = $("#regimeHedgeRow");
+  if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
+  const gRow = $("#goldOnRow");
+  if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
+  const bandRow = $("#bandRow");
+  if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
+  const momRow = $("#momControls");
+  if (momRow)
+    momRow.style.display =
+      state.rebalance === "MOM" ||
+      state.rebalance === "DMOM" ||
+      state.rebalance === "MOM12_1" ||
+      state.rebalance === "XSMOM"
+        ? "flex"
+        : "none";
+  const cashRow = $("#dmomCashRow");
+  if (cashRow)
+    cashRow.style.display =
+      state.rebalance === "DMOM" ||
+      state.maOverlay ||
+      (state.regimeHedge && state.regimeHedgeMode === "cash") ||
+      state.volTarget ||
+      state.sleeveTrend
+        ? "flex"
+        : "none";
+}
+
+/** 주소창에서 해시를 고치면(새로고침 없이) 공유 키·mode=pro를 바로 적용한다.
+ * history.replaceState로 앱이 직접 쓴 해시는 hashchange를 일으키지 않는다. */
+async function onShareHashChange() {
+  if (!state.meta) return;
+  const raw = (location.hash || "").replace(/^#/, "");
+  const dv = divDecodeHash(location.hash);
+  if (dv) {
+    await divShowMode("div");
+    await divApplyShareState(dv);
+    return;
+  }
+  const params = new URLSearchParams(raw);
+  if (typeof nlSetPro === "function") nlSetPro(params.get("mode") === "pro", { noHash: true });
+  else state.proMode = params.get("mode") === "pro";
+  const shared = parseShareHash();
+  if (!shared || !(shared.get("preset") || shared.get("h"))) {
+    // 「#mode=pro」만 고친 경우: 모드만 바꾸고 해시를 지금 설정 전체로 다시 쓴다
+    if (state.lastRun && typeof nlSyncHash === "function") nlSyncHash();
+    return;
+  }
+  const pl = $("#priceLayout");
+  if (pl && pl.hidden) divShowMode("price");
+  if (state.lastRun && raw === encodeShareParams()) return; // 이미 같은 설정
+  rankUi.pick = null;
+  if (typeof nlUi !== "undefined") { nlUi.booted = false; nlUi.bootFromShare = true; } // 해석 줄을 「링크로 연 설정」으로
+  await applyShareParams(shared);
+  syncShareRows();
+  if (typeof syncControlsFromState === "function") syncControlsFromState();
+  renderList();
+  await run();
+}
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("hashchange", () => {
+    onShareHashChange().catch((e) => console.warn(e));
+  });
+}
+
 async function applyShareParams(params) {
   const preset = params.get("preset");
   if (preset && PRESETS[preset]) {
@@ -1066,7 +1135,7 @@ async function boot() {
   renderBenchOptions();
   renderHedgeOptions();
   try {
-    const cpiRes = await fetch("./data/cpi_kr.json?v=nl5");
+    const cpiRes = await fetch("./data/cpi_kr.json?v=nl6");
     if (cpiRes.ok) state.cpi = await cpiRes.json();
   } catch (_) { /* gated */ }
   try {
@@ -1080,34 +1149,7 @@ async function boot() {
   if (shared && (shared.get("preset") || shared.get("h"))) {
     await applyShareParams(shared);
     // syncStratControls is wired on DOMContentLoaded; call after controls exist
-    syncMaFreqHint();
-    const maRow = $("#maOverlayRow");
-    if (maRow) maRow.style.display = state.maOverlay ? "flex" : "none";
-    const rhRow = $("#regimeHedgeRow");
-    if (rhRow) rhRow.style.display = state.regimeHedge ? "flex" : "none";
-    const gRow = $("#goldOnRow");
-    if (gRow) gRow.style.display = state.goldOn ? "flex" : "none";
-    const bandRow = $("#bandRow");
-    if (bandRow) bandRow.style.display = state.bandOn ? "flex" : "none";
-    const momRow = $("#momControls");
-    if (momRow)
-      momRow.style.display =
-        state.rebalance === "MOM" ||
-        state.rebalance === "DMOM" ||
-        state.rebalance === "MOM12_1" ||
-        state.rebalance === "XSMOM"
-          ? "flex"
-          : "none";
-    const cashRow = $("#dmomCashRow");
-    if (cashRow)
-      cashRow.style.display =
-        state.rebalance === "DMOM" ||
-        state.maOverlay ||
-        (state.regimeHedge && state.regimeHedgeMode === "cash") ||
-        state.volTarget ||
-        state.sleeveTrend
-          ? "flex"
-          : "none";
+    syncShareRows();
     await run();
   } else {
     await applyPreset("kAllWeather");
@@ -5204,7 +5246,14 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
   state.viewMode = "single";
   const dcaNote =
     r.monthlyContribution > 0
-      ? `<div class="warn">월 적립 · 납입 합 ${won(r.totalInvested)} → 기말 ${won(r.finalValue)} · ${r.contributions}회 납입 · 수익률은 납입 원금 합 대비</div>`
+      ? (() => {
+          // contributions = 초기 1회 + 매월 납입 횟수. 매월 납입은 리밸런싱 날이면 리밸런싱과 함께 매수되고(별도 추가매수로 세지 않음), 아니면 추가매수.
+          const nMonthly = Math.max(0, (r.contributions || 1) - 1);
+          const nBuy = r.dcaBuyCount || 0;
+          const nWithRebal = Math.max(0, nMonthly - nBuy);
+          const initAmt = r.totalInvested - nMonthly * r.monthlyContribution;
+          return `<div class="warn">월 납입 · 납입 합 ${won(r.totalInvested)} (초기 ${won(initAmt)} + 매월 ${won(r.monthlyContribution)} × ${nMonthly}회) → 기말 ${won(r.finalValue)} · 납입 ${r.contributions}회 = 초기 1회 + 매월 ${nMonthly}회 (매월 ${nMonthly}회 중 ${nWithRebal}회는 리밸런싱 날 함께 처리 · ${nBuy}회는 리밸런싱 없는 달 추가매수) · 수익률은 납입 원금 합 대비</div>`;
+        })()
       : "";
   const usingTr = state.totalReturn && hasRealTrData();
   const trNote = usingTr
@@ -5260,7 +5309,7 @@ function renderResult(r, bench, picks, corr, tax, windowInfo) {
 
     ? `<div class="warn">리밸런싱 밴드 · ±${(Number(r.bandPct) * 100).toFixed(0)}% · 리밸런싱 ${r.rebalCount != null ? r.rebalCount : "—"}회 · Q/Y/M 캘린더 무시·매일 드리프트 검사 · MOM/DMOM에는 미적용 · 과거 시뮬</div>`
     : r.rebalCount != null && (state.rebalance !== "N" || r.sleeveUpdateCount || r.dcaBuyCount)
-      ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})${r.sleeveUpdateCount ? ` · 오버레이 슬리브 갱신 ${r.sleeveUpdateCount}회` : ""}${r.dcaBuyCount ? ` · 적립 추가매수 ${r.dcaBuyCount}회` : ""}</div>`
+      ? `<div class="warn">리밸런싱 ${r.rebalCount}회 (캘린더 ${state.rebalance})${r.sleeveUpdateCount ? ` · 오버레이 슬리브 갱신 ${r.sleeveUpdateCount}회` : ""}${r.dcaBuyCount ? ` · 리밸런싱 없는 달 납입 추가매수 ${r.dcaBuyCount}회(리밸런싱 날 납입은 리밸런싱에 포함)` : ""}</div>`
       : "";
   const winCard = renderWindowCard(windowInfo || (state.lastRun && state.lastRun.windowInfo));
   const exportBar = renderExportBar();
